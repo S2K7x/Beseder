@@ -1,0 +1,17 @@
+# À copier dans /etc/systemd/system/beseder.service (adapte User et les chemins).
+[Unit]
+Description=Beseder - client mail
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/Beseder
+Environment=BESEDER_DATA_DIR=/home/pi/Beseder/data
+ExecStart=/home/pi/Beseder/.venv/bin/python -m beseder
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

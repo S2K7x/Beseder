@@ -1,0 +1,114 @@
+"""Stockage SQLite. Une connexion par appel : simple et sûr avec les threads de sync."""
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    kind TEXT NOT NULL,              -- gmail | icloud | outlook | imap
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    secret BLOB NOT NULL,            -- chiffré (mot de passe ou refresh token)
+    uidvalidity INTEGER,
+    last_uid INTEGER NOT NULL DEFAULT 0,
+    last_sync TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    uid INTEGER NOT NULL,
+    message_id TEXT,
+    in_reply_to TEXT,
+    refs TEXT,
+    subject TEXT NOT NULL DEFAULT '',
+    from_name TEXT NOT NULL DEFAULT '',
+    from_addr TEXT NOT NULL DEFAULT '',
+    reply_to TEXT NOT NULL DEFAULT '',
+    to_addrs TEXT NOT NULL DEFAULT '',
+    cc_addrs TEXT NOT NULL DEFAULT '',
+    date TEXT NOT NULL,
+    snippet TEXT NOT NULL DEFAULT '',
+    body_text TEXT NOT NULL DEFAULT '',
+    body_html TEXT NOT NULL DEFAULT '',
+    list_unsubscribe INTEGER NOT NULL DEFAULT 0,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    seen INTEGER NOT NULL DEFAULT 0,
+    category TEXT,
+    category_source TEXT,            -- ai | rule | user
+    UNIQUE(account_id, uid)
+);
+CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_cat ON messages(category);
+
+-- Règles par expéditeur créées quand l'utilisateur recatégorise un mail.
+CREATE TABLE IF NOT EXISTS sender_rules (
+    addr TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- Journal des actions IA / écritures IMAP. Jamais de contenu de mail ici.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT ''
+);
+"""
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+class DB:
+    def __init__(self, path: Path):
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self.conn() as c:
+            c.execute("PRAGMA journal_mode=WAL")
+            c.executescript(SCHEMA)
+
+    @contextmanager
+    def conn(self):
+        c = sqlite3.connect(self.path, timeout=30)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA foreign_keys=ON")
+        try:
+            yield c
+            c.commit()
+        finally:
+            c.close()
+
+    # --- settings -------------------------------------------------------
+    def get_setting(self, key: str, default=None):
+        with self.conn() as c:
+            row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return json.loads(row["value"]) if row else default
+
+    def set_setting(self, key: str, value) -> None:
+        with self.conn() as c:
+            c.execute(
+                "INSERT INTO settings(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, json.dumps(value)),
+            )
+
+    def audit(self, action: str, detail: str = "") -> None:
+        with self.conn() as c:
+            c.execute("INSERT INTO audit_log(ts, action, detail) VALUES(?,?,?)", (now_iso(), action, detail))

@@ -1,0 +1,16 @@
+{
+  "name": "Beseder",
+  "short_name": "Beseder",
+  "description": "Tes boîtes mail réunies, triées et résumées par ton IA.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f6f8",
+  "theme_color": "#4f46e5",
+  "lang": "fr",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

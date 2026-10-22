@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#4f46e5">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Beseder">
+  <title>Beseder</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <button id="back" class="icon-btn" hidden aria-label="Retour">‹</button>
+    <h1 id="title">Beseder</h1>
+    <span id="sync-state" class="muted small"></span>
+    <button id="sync" class="icon-btn" aria-label="Synchroniser">⟳</button>
+    <button id="settings" class="icon-btn" aria-label="Réglages">⚙</button>
+  </header>
+  <main id="view"></main>
+  <div id="toast" role="status" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
