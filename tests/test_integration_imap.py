@@ -332,3 +332,29 @@ def test_conversation_is_grouped_and_archived_together(env):
     s.select_folder("INBOX", readonly=True)
     assert len(s.search("ALL")) == 3
     s.logout()
+
+
+def test_browse_and_search_archived_mail(env):
+    core, client, account_id, user = env
+    s = server(user)
+    s.create_folder("Archive")
+    for i in range(1, 61):
+        s.append("Archive", mail(i, subject="Facture électricité" if i == 33 else None), flags=[b"\\Seen"] if i % 2 == 0 else [])
+    s.logout()
+    browse = client.get(f"/api/accounts/{account_id}/folders").json()["browse"]
+    assert "Archive" in [f["name"] for f in browse] and browse[0]["name"] == "INBOX"
+    r = client.get(f"/api/accounts/{account_id}/browse", params={"folder": "Archive"}).json()
+    assert len(r["items"]) == 50 and r["items"][0]["subject"] == "Message 60" and r["more"]
+    r2 = client.get(f"/api/accounts/{account_id}/browse", params={"folder": "Archive", "before": r["more"]}).json()
+    assert len(r2["items"]) == 10 and r2["more"] is None
+    hit = client.get(f"/api/accounts/{account_id}/browse", params={"folder": "Archive", "q": "électricité"}).json()["items"]
+    assert [i["subject"] for i in hit] == ["Facture électricité"]
+    m = client.get(f"/api/accounts/{account_id}/browse/message", params={"folder": "Archive", "uid": hit[0]["uid"]}).json()
+    assert m["body_text"] == "Plain body 33"
+    # Reading changed nothing: still unread on the server, nothing stored locally.
+    s = server(user)
+    s.select_folder("Archive", readonly=True)
+    assert b"\\Seen" not in s.get_flags([hit[0]["uid"]])[hit[0]["uid"]] and len(s.search("ALL")) == 60
+    s.logout()
+    with core.db.conn() as c:
+        assert c.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0

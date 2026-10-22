@@ -211,6 +211,16 @@ body[data-view="settings"] .side-col { display: none; }
 .snooze-custom input { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 6px 8px; background: var(--soft); }
 .tag svg.icon { width: 12px; height: 12px; }
 .chip svg.icon { width: 15px; height: 15px; }
+.browse-pickers { display: flex; gap: 8px; flex-wrap: wrap; }
+.browse-pickers .select-pill { max-width: 100%; min-width: 0; }
+.browse-pickers select { max-width: 220px; min-width: 0; }
+.browse-search { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 0 14px; height: 44px;
+  border-radius: 999px; background: var(--soft); color: var(--muted); }
+.browse-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--text); }
+.link-strong { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.link-strong:hover { text-decoration: underline; }
+.list-head .card-head h2 .avatar { width: 28px; height: 28px; font-size: 11px; }
+.list-head .card-head h2 { min-width: 0; overflow-wrap: anywhere; }
 
 .avatar {
   width: 44px; height: 44px; border-radius: 50%; flex: none; display: grid; place-items: center;

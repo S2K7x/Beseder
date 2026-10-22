@@ -9,6 +9,9 @@ running on your own Raspberry Pi.
 - **Sorts your mail** into Important, Notifications, Newsletters, Promotions, Receipts and Other.
 - **Instant and notified**: new mail shows up within seconds, with a notification for the important ones.
 - **Conversations**: replies are grouped, with your own answers in the timeline.
+- **All your mail, not just the inbox**: browse Archive, All Mail, Sent or any folder and
+  search years of mail on the server (Gmail's search syntax works too), or see everything
+  from one sender.
 - **Archive, move, snooze, select several**: process your inbox fast, with an Undo and
   keyboard shortcuts. The trash is never one tap away.
 - **Briefs you**: one tap, or every morning with a notification, the AI tells you what matters.

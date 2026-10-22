@@ -14,7 +14,8 @@ Beseder itself only changes your mailbox when **you** tap a button: mark as read
 draft, archive or move to a folder (never to the trash, and with an Undo). It reads your
 Sent folder to know what you already answered, but never writes to it. Selecting several
 emails changes nothing to this: the same actions, on more emails, still with an Undo.
-Snoozing changes nothing on the server at all.
+Snoozing changes nothing on the server at all, and browsing other folders opens them read
+only: it doesn't even mark what you read.
 
 ## Unsubscribing is locked down
 

@@ -155,6 +155,9 @@ Beseder doesn't support Proton for now.
   check every 5 minutes as a safety net. The first sync imports the last 30 days.
 - It marks an email as read when you open it, like any mail app.
 - It saves a draft in your **Drafts** folder when you tap the save arrow.
+- When you open **Folders**, it reads that folder live from the server, read only: nothing
+  is copied into Beseder and nothing is marked as read. Searching there uses your
+  provider's own search (on Gmail, the same syntax as gmail.com: `from:bob has:attachment`).
 - It reads your **Sent** folder (read only, last 30 days at first) to know which emails you
   already answered and how you write.
 - It moves an email out of the inbox when **you** tap Archive or Move (with an Undo). Archive

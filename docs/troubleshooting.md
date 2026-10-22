@@ -106,6 +106,12 @@ Beseder only unsubscribes in one tap through public `https` links (see
 open the email and use the unsubscribe link at the bottom of the message, or mark the sender
 with the tag button so their mail goes to Promotions.
 
+## Search doesn't find an old email
+
+The search box looks in your inbox first. Tap **Search all mail on the server** below the
+results (or open **Folders**) to search everything your provider keeps. On Gmail, pick
+**All mail**: it contains every archived email. Some providers only search whole words.
+
 ## A snoozed email still shows in my phone's mail app
 
 That's expected: snooze only exists in Beseder, so it never moves anything on your mail

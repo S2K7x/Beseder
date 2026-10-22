@@ -254,6 +254,9 @@ const state = {
   accountId: "",
   q: "",
   followups: false,  // list column shows "To reply" / "Waiting for a reply"
+  browse: null,      // { accountId, folder, q }: another folder, read live from the server
+  folderMsg: null,   // { accountId, uid } of the folder email open in the reader
+  sender: "",        // list shows everything from this address
   snoozed: false,    // list column shows snoozed mail
   selecting: false,  // multi-select mode in the list
   picked: new Set(), // ids picked in multi-select mode (each stands for its conversation)
@@ -270,9 +273,12 @@ window.addEventListener("hashchange", route);
 async function route() {
   const hash = location.hash || "#/";
   const m = hash.match(/^#\/m\/(\d+)$/);
+  const f = hash.match(/^#\/f\/(\d+)\/(\d+)$/);
   state.selectedId = m ? Number(m[1]) : null;
+  state.folderMsg = f && state.browse ? { accountId: Number(f[1]), uid: Number(f[2]) } : null;
+  if (f && !state.browse) return go("#/");  // a reload lost which folder it was
   const views = { "#/settings": "settings", "#/brief": "brief", "#/welcome": "welcome" };
-  state.view = m ? "message" : views[hash] || "inbox";
+  state.view = m || f ? "message" : views[hash] || "inbox";
   await refreshStatus();
   // First launch: the setup assistant runs until it is finished (or skipped).
   if (state.status && !state.status.onboarded && state.view !== "welcome") return go("#/welcome");
@@ -310,17 +316,20 @@ function navItems() {
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   const listView = state.view === "inbox" || state.view === "message";
   const follow = state.status?.followups || {};
-  const list = (f) => () => { Object.assign(state, { category: "", unread: false, followups: false, ask: null, snoozed: false }, f); navigateList(); };
-  const plain = listView && !state.followups && !state.ask && !state.snoozed;
+  const list = (f) => () => { Object.assign(state, LIST_RESET, f); navigateList(); };
+  const plain = listView && !state.followups && !state.ask && !state.snoozed && !state.browse && !state.sender;
   return [
     { icon: "inbox", label: "Inbox", badge: total, active: plain && !state.category && !state.unread, go: list({}) },
     { icon: "star", label: "Important", badge: counts.important, active: plain && state.category === "important",
       go: list({ category: "important" }) },
     { icon: "unread", label: "Unread", active: plain && state.unread && !state.category, go: list({ unread: true }) },
     { icon: "clock", label: "Follow-ups", badge: follow.to_reply, active: listView && state.followups, go: list({ followups: true }) },
+    { icon: "folder", label: "Folders", active: listView && !!state.browse, go: () => openBrowse() },
     { icon: "sparkles", label: "Brief", active: state.view === "brief", go: () => go("#/brief") },
   ];
 }
+
+const LIST_RESET = { category: "", unread: false, followups: false, ask: null, snoozed: false, browse: null, sender: "" };
 
 function navigateList() {
   $("list-col").dataset.ready = "";
@@ -339,7 +348,7 @@ function renderChrome() {
   }));
   $("rail-settings").classList.toggle("active", state.view === "settings");
 
-  const tabs = [items[0], items[3], items[4],
+  const tabs = [items[0], items[3], items[5],
     { icon: "settings", label: "Settings", active: state.view === "settings", go: () => go("#/settings") }];
   $("tabbar").replaceChildren(...tabs.map((it) => h("a", { href: "#", class: it.active ? "active" : "",
     onclick: (e) => { e.preventDefault(); it.go(); } }, icon(it.icon), it.label,
@@ -364,6 +373,7 @@ async function renderList(before, beforeId) {
   if (!st) return;
   if (state.followups && !before) return renderFollowups(col);
   if (state.ask && !before) return renderAsk(col);
+  if (state.browse && !before) return renderBrowse(col);
   if (!before) {
     col.dataset.ready = "1";
     const counts = st.unread_by_category || {};
@@ -373,9 +383,11 @@ async function renderList(before, beforeId) {
     }, label, counts[key] ? h("span", { class: "count" }, counts[key]) : null);
     col.replaceChildren(
       miniBrief(),
+      state.sender ? senderHead() : null,
       h("div", { class: "chips" },
         h("button", { class: "chip" + (state.selecting ? " active" : ""), title: "Select several (x)", "aria-label": "Select",
           onclick: () => (state.selecting ? endSelect() : startSelect()) }, icon("checks")),
+        h("button", { class: "chip", title: "Archive and other folders", onclick: () => openBrowse() }, icon("folder"), "Folders"),
         h("button", { class: "chip" + (!state.category ? " active" : ""), onclick: () => { state.category = ""; navigateList(); } },
           state.unread ? "All unread" : "All"),
         Object.keys(st.categories).map((k) => chip(k, CATS[k]?.label || k)),
@@ -396,6 +408,7 @@ async function renderList(before, beforeId) {
   if (state.unread) params.set("unread", "true");
   if (state.q) params.set("q", state.q);
   if (state.snoozed) params.set("snoozed", "true");
+  if (state.sender) params.set("sender", state.sender);
   if (before) { params.set("before", before); params.set("before_id", beforeId); }
   let rows;
   try { rows = await api("/api/messages?" + params); } catch (e) { toast(e.message); return; }
@@ -403,8 +416,13 @@ async function renderList(before, beforeId) {
   $("more")?.remove();
   if (!before && rows.length === 0) {
     cards.replaceChildren(h("div", { class: "card empty" }, h("div", { class: "big" }, icon("inbox")),
-      st.syncing ? "Syncing your mailboxes…" : state.q ? "No match." : state.snoozed ? "Nothing snoozed." : "Nothing here. Enjoy the quiet."));
+      st.syncing ? "Syncing your mailboxes…" : state.q ? "Nothing in your inbox." : state.snoozed ? "Nothing snoozed." : "Nothing here. Enjoy the quiet.",
+      state.q ? h("button", { class: "pill sm", style: "margin-top:12px", onclick: () => openBrowse({ q: state.q }) },
+        icon("search"), "Search all mail on the server") : null));
     return;
+  }
+  if (!before && state.q) {
+    cards.append(h("button", { class: "pill sm more", onclick: () => openBrowse({ q: state.q }) }, icon("search"), "Search older mail on the server"));
   }
   const prio = priorityMap();
   for (const r of rows) cards.append(mailCard(r, prio[r.id]));
@@ -500,6 +518,132 @@ function renderAsk(col) {
   col.replaceChildren(head, h("div", { id: "cards", style: "display:flex;flex-direction:column;gap:12px" },
     result.items.map((r) => mailCard(r))));
   markSelected();
+}
+
+// --- other folders (read only, live from the server) ---------------------------------------
+// opts: { accountId, folder, q }. Without a folder, opens the archive (or All Mail).
+async function openBrowse(opts = {}) {
+  const accounts = state.status?.accounts || [];
+  if (!accounts.length) return toast("Add a mailbox first");
+  const accountId = opts.accountId || Number(state.accountId) || accounts[0].id;
+  Object.assign(state, LIST_RESET, { browse: { accountId, folder: opts.folder || "", q: opts.q || "" } });
+  navigateList();
+}
+
+async function folderList(accountId) {
+  return (state.folders[accountId] ||= await api(`/api/accounts/${accountId}/folders`));
+}
+
+async function renderBrowse(col, before) {
+  const b = state.browse;
+  col.dataset.ready = "1";
+  const head = h("div", { class: "card list-head" }, h("div", { class: "card-head" }, h("h2", {}, icon("folder"), "Folders"),
+    h("button", { class: "round xs", title: "Back to the inbox", "aria-label": "Close",
+      onclick: () => { Object.assign(state, LIST_RESET); navigateList(); } }, icon("chevronLeft"))));
+  if (!before) col.replaceChildren(head, h("div", { class: "card empty" }, "Opening the folder…"));
+  let folders;
+  try { folders = await folderList(b.accountId); } catch (e) { col.replaceChildren(head, h("div", { class: "card empty error" }, e.message)); return; }
+  const browse = folders.browse || [];
+  if (!b.folder) b.folder = (browse.find((x) => x.role === "all") || browse.find((x) => x.role === "archive") || browse[0] || {}).name || "INBOX";
+  const accounts = state.status.accounts;
+  const accSel = h("select", { "aria-label": "Mailbox" }, accounts.map((a) => h("option", { value: String(a.id) }, a.name)));
+  accSel.value = String(b.accountId);
+  accSel.addEventListener("change", () => openBrowse({ accountId: Number(accSel.value), q: b.q }));
+  const ROLE = { inbox: "Inbox", all: "All mail", archive: "Archive", sent: "Sent", drafts: "Drafts", flagged: "Starred", junk: "Junk", trash: "Trash" };
+  const folderSel = h("select", { "aria-label": "Folder" }, browse.map((x) => h("option", { value: x.name },
+    ROLE[x.role] && x.role !== "inbox" && ROLE[x.role] !== x.name ? `${ROLE[x.role]} (${x.name})` : x.name)));
+  folderSel.value = b.folder;
+  folderSel.addEventListener("change", () => openBrowse({ accountId: b.accountId, folder: folderSel.value, q: b.q }));
+  const q = h("input", { type: "search", value: b.q, placeholder: "Search this folder on the server", "aria-label": "Search this folder" });
+  q.addEventListener("keydown", (e) => { if (e.key === "Enter") openBrowse({ accountId: b.accountId, folder: b.folder, q: q.value.trim() }); });
+  put(head,
+    h("div", { class: "browse-pickers" },
+      accounts.length > 1 ? h("label", { class: "select-pill" }, icon("at"), accSel) : null,
+      h("label", { class: "select-pill" }, icon("folder"), folderSel)),
+    h("label", { class: "browse-search" }, icon("search"), q),
+    h("p", { class: "muted small", style: "margin:8px 0 0" }, "Read only, straight from your mail server: nothing is changed or marked as read."));
+  const cards = h("div", { id: "cards", style: "display:flex;flex-direction:column;gap:12px" }, h("div", { class: "card empty" }, b.q ? "Searching…" : "Loading…"));
+  if (!before) col.replaceChildren(head, cards);
+  let r;
+  try {
+    const params = new URLSearchParams({ folder: b.folder });
+    if (b.q) params.set("q", b.q);
+    if (before) params.set("before", before);
+    r = await api(`/api/accounts/${b.accountId}/browse?` + params);
+  } catch (e) { (before ? $("cards") : cards).replaceChildren(h("div", { class: "card empty error" }, e.message)); return; }
+  if (state.browse !== b) return;
+  const box = $("cards");
+  if (!before) box.replaceChildren();
+  $("more")?.remove();
+  if (!before && !r.items.length) box.append(h("div", { class: "card empty" }, b.q ? "No match in this folder." : "This folder is empty."));
+  for (const it of r.items) box.append(folderCard(b, it));
+  if (r.more) box.after(h("button", { class: "pill more", id: "more", onclick: () => renderBrowse(col, r.more) }, "Load more"));
+  markSelected();
+}
+
+function folderCard(b, it) {
+  const [first, last] = splitName(it.from_name, it.from_addr);
+  const open = () => go(`#/f/${b.accountId}/${it.uid}`);
+  return h("article", { class: "card mail-card" + (it.seen ? "" : " unread"), "data-uid": it.uid, tabindex: "0",
+    onclick: open, onkeydown: (e) => { if (e.key === "Enter") open(); } },
+    h("div", { class: "who" }, avatar(it.from_name, it.from_addr),
+      h("div", { class: "who-name" }, h("span", {}, first), h("span", {}, last || it.from_addr)),
+      h("span", { class: "round xs", "aria-hidden": "true" }, icon("arrowUpRight"))),
+    h("h3", {}, it.subject || "(no subject)"),
+    h("div", { class: "when" }, fmtWhen(it.date), it.size > 1e6 ? ` · ${fmtSize(it.size)}` : ""));
+}
+
+async function renderFolderMessage(col, ref) {
+  const b = state.browse;
+  col.replaceChildren(h("div", { class: "card empty" }, "Opening…"));
+  let m;
+  try {
+    m = await api(`/api/accounts/${ref.accountId}/browse/message?` + new URLSearchParams({ folder: b.folder, uid: ref.uid }));
+  } catch (e) { col.replaceChildren(h("div", { class: "card empty error" }, e.message)); return; }
+  if (state.folderMsg?.uid !== ref.uid) return;
+  let images = false, plain = !m.body_html;
+  const bodyBox = h("div", { class: "body" });
+  const renderBody = () => bodyBox.replaceChildren(!plain ? emailFrame(m.body_html, images) : h("pre", { class: "text" }, m.body_text));
+  renderBody();
+  const imgBtn = h("button", { class: "round sm", title: "Show remote images", "aria-label": "Show images", hidden: !m.body_html,
+    onclick: () => { images = !images; imgBtn.classList.toggle("on", images); renderBody(); } }, icon("image"));
+  const textBtn = h("button", { class: "round sm", title: "Plain text version", "aria-label": "Plain text", hidden: !m.body_html,
+    onclick: () => { plain = !plain; textBtn.classList.toggle("on", plain); renderBody(); } }, icon("fileText"));
+  const addr = ((m.reply_to || "").match(/<([^>]+)>/) || [null, m.reply_to || m.from_addr])[1].trim();
+  const subject = /^re\s?:/i.test(m.subject || "") ? m.subject : `Re: ${m.subject || ""}`;
+  const files = m.attachments.length ? h("div", { class: "attachments" }, m.attachments.map((a) =>
+    h("a", { class: "attachment", download: a.filename, title: a.filename,
+      href: `/api/accounts/${ref.accountId}/browse/attachment?` + new URLSearchParams({ folder: b.folder, uid: ref.uid, idx: a.idx }) },
+      h("span", { class: "ico" }, icon("paperclip")),
+      h("span", { class: "grow" }, h("span", { class: "t" }, a.filename), h("span", { class: "s" }, fmtSize(a.size)))))) : null;
+  col.replaceChildren(h("div", { class: "card reader" },
+    h("div", { class: "reader-top" },
+      h("span", { class: "tag" }, icon("folder"), b.folder),
+      h("span", { class: "date" }, new Date(m.date).toLocaleString("en-GB",
+        { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" }))),
+    h("div", { class: "person" },
+      avatar(m.from_name, m.from_addr, "lg"),
+      h("h2", {}, m.from_name || m.from_addr),
+      h("div", { class: "sub" }, m.from_name ? `${m.from_addr} · ` : "", `in ${m.account_name}`),
+      h("div", { class: "subject" }, m.subject || "(no subject)")),
+    h("div", { class: "actions-row" },
+      h("a", { class: "pill", href: `mailto:${encodeURIComponent(addr)}?subject=${encodeURIComponent(subject)}` }, icon("reply"), "Reply in mail app"),
+      imgBtn, textBtn),
+    bodyBox, files));
+  document.querySelectorAll(".mail-card[data-uid]").forEach((c) => c.classList.toggle("selected", Number(c.dataset.uid) === ref.uid));
+}
+
+// --- everything from one sender ---------------------------------------------------------------
+function senderHead() {
+  const addr = state.sender;
+  return h("div", { class: "card list-head" },
+    h("div", { class: "card-head" }, h("h2", {}, avatar("", addr, "sm"), addr),
+      h("button", { class: "round xs", title: "Back to the inbox", "aria-label": "Close",
+        onclick: () => { Object.assign(state, LIST_RESET); navigateList(); } }, icon("chevronLeft"))),
+    h("div", { class: "btns", style: "margin-top:0" },
+      h("button", { class: "pill sm", onclick: () => { if (confirm(`Archive every email from ${addr} in your inboxes?`)) archiveSender(addr); } },
+        icon("archive"), "Archive all"),
+      h("button", { class: "pill sm", onclick: () => openBrowse({ q: addr }) }, icon("search"), "Older mail on the server")));
 }
 
 function priorityMap() {
@@ -673,6 +817,7 @@ function miniBrief() {
 function renderReader() {
   const col = $("reader-col");
   if (state.selectedId) return renderMessage(col, state.selectedId);
+  if (state.folderMsg) return renderFolderMessage(col, state.folderMsg);
   col.replaceChildren(briefHome());
 }
 
@@ -829,7 +974,8 @@ async function renderMessage(col, id) {
         { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" }))),
     h("div", { class: "person" },
       avatar(m.from_name, m.from_addr, "lg", account?.kind),
-      h("h2", {}, m.from_name || m.from_addr),
+      h("h2", {}, h("button", { class: "link-strong", title: `Everything from ${m.from_addr}`,
+        onclick: () => { Object.assign(state, LIST_RESET, { sender: m.from_addr }); navigateList(); } }, m.from_name || m.from_addr)),
       h("div", { class: "sub" }, m.from_name ? `${m.from_addr} · ` : "", `to ${m.account_name}`),
       h("div", { class: "subject" }, m.subject || "(no subject)")),
     h("div", { class: "actions-row" }, replyBtn, archiveBtn, snoozeBtn, moveBtn, unsubBtn, ruleBtn, imgBtn, textBtn),
@@ -1087,7 +1233,9 @@ function mailboxesWidget() {
       h("div", { class: "grow" },
         h("div", { class: "t" }, a.name, h("span", { class: "muted", style: "font-weight:400" }, ` · ${providerOf(a.kind).label}`)),
         a.last_error ? h("div", { class: "s error" }, a.last_error) : h("div", { class: "s" }, `${a.email} · ${fmtAgo(a.last_sync)}`)),
-      a.unread ? h("span", { class: "tag" + (state.accountId === String(a.id) ? " dark" : "") }, a.unread) : null))
+      a.unread ? h("span", { class: "tag" + (state.accountId === String(a.id) ? " dark" : "") }, a.unread) : null,
+      h("button", { class: "round xs", title: `Folders of ${a.name}`, "aria-label": `Folders of ${a.name}`,
+        onclick: (e) => { e.stopPropagation(); openBrowse({ accountId: a.id }); } }, icon("folder"))))
       : h("p", { class: "muted small" }, "No mailbox yet."));
 }
 

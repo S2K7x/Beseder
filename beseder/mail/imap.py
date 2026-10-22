@@ -52,6 +52,11 @@ ARCHIVE_NAMES = ("Archive", "Archives", "INBOX.Archive")
 NOT_A_TARGET = {b"\\Noselect", b"\\NonExistent", b"\\Trash", b"\\Drafts", b"\\Sent",
                 b"\\Flagged", b"\\Important", b"\\All"}
 GMAIL = b"X-GM-EXT-1"
+# Browsing other folders (read only, live from the server).
+FOLDER_PAGE = 50
+FOLDER_MAX_BYTES = 25 * 1024 * 1024
+BROWSE_ROLES = [("inbox", b"\\Inbox"), ("all", b"\\All"), ("archive", b"\\Archive"), ("sent", b"\\Sent"),
+                ("drafts", b"\\Drafts"), ("flagged", b"\\Flagged"), ("junk", b"\\Junk"), ("trash", b"\\Trash")]
 # Sent folder: read only, to know what was answered and how the user writes.
 SENT_NAMES = ("Sent", "Sent Items", "Sent Messages", "Sent Mail", "INBOX.Sent", "Envoyés",
               "Éléments envoyés", "Messages envoyés")
@@ -422,7 +427,85 @@ class MailService:
             name for flags, _sep, name in folders
             if name.upper() != "INBOX" and not (set(flags) & NOT_A_TARGET)
         )
-        return {"archive": self._archive_folder(folders), "folders": targets}
+        return {"archive": self._archive_folder(folders), "folders": targets, "browse": self._browsable(folders)}
+
+    @staticmethod
+    def _browsable(folders) -> list[dict]:
+        """Every folder that can be opened, with its role, useful ones first."""
+        out = []
+        for flags, _sep, name in folders:
+            flags = set(flags)
+            if flags & {b"\\Noselect", b"\\NonExistent"}:
+                continue
+            role = next((r for r, f in BROWSE_ROLES if f in flags), "")
+            if not role:
+                role = "inbox" if name.upper() == "INBOX" else "archive" if name in ARCHIVE_NAMES else ""
+            out.append({"name": name, "role": role})
+        order = [r for r, _f in BROWSE_ROLES]
+        return sorted(out, key=lambda f: (f["role"] == "", order.index(f["role"]) if f["role"] in order else -1,
+                                          f["name"].lower()))
+
+    # --- read-only browsing of other folders (nothing is stored) ----------------
+    def _open_folder(self, client: IMAPClient, folder: str) -> None:
+        names = {name for flags, _sep, name in client.list_folders() if b"\\Noselect" not in flags}
+        if folder not in names:
+            raise LookupError("Folder not found")
+        client.select_folder(folder, readonly=True)  # read only: nothing changes, not even "read"
+
+    def folder_messages(self, account_id: int, folder: str, before_uid: int = 0, query: str = "") -> dict:
+        """The latest messages of a folder (or those matching a search), newest first, read
+        live from the server. Returns {"items": [...], "more": uid to continue from or None}."""
+        query = query.strip()[:200]
+        with self.connect(self.get_account(account_id)) as client:
+            self._open_folder(client, folder)
+            if query:
+                if client.has_capability(GMAIL):
+                    uids = client.gmail_search(query)  # Gmail's own search syntax works here
+                else:
+                    uids = client.search(["TEXT", query], charset="UTF-8")
+                if before_uid:
+                    uids = [u for u in uids if u < before_uid]
+            else:
+                criteria = ["UID", f"1:{before_uid - 1}"] if before_uid > 1 else ["ALL"]
+                uids = [] if before_uid == 1 else client.search(criteria)
+            uids = sorted(uids)
+            page, rest = uids[-FOLDER_PAGE:], uids[:-FOLDER_PAGE]
+            data = client.fetch(page, ["FLAGS", "INTERNALDATE", "RFC822.SIZE", "BODY.PEEK[HEADER]"]) if page else {}
+        items = []
+        for uid in reversed(page):
+            d = data.get(uid)
+            if not d:
+                continue
+            p = parse_message(d.get(b"BODY[HEADER]") or b"", fallback_date=_aware(d.get(b"INTERNALDATE")), headers_only=True)
+            items.append({"uid": uid, "subject": p.subject, "from_name": p.from_name, "from_addr": p.from_addr,
+                          "to": p.to_addrs, "date": p.date, "seen": int(b"\\Seen" in d.get(b"FLAGS", ())),
+                          "size": d.get(b"RFC822.SIZE", 0)})
+        return {"items": items, "more": page[0] if rest else None}
+
+    def _fetch_full(self, account_id: int, folder: str, uid: int) -> bytes:
+        with self.connect(self.get_account(account_id)) as client:
+            self._open_folder(client, folder)
+            size = client.fetch([uid], ["RFC822.SIZE"]).get(uid, {}).get(b"RFC822.SIZE")
+            if size is None:
+                raise LookupError("This email is no longer in this folder")
+            if size > FOLDER_MAX_BYTES:
+                raise ValueError("This email is too big to open in Beseder: open it in your mail app")
+            data = client.fetch([uid], ["BODY.PEEK[]"]).get(uid)
+        if not data:
+            raise LookupError("This email is no longer in this folder")
+        return data[b"BODY[]"]
+
+    def folder_message(self, account_id: int, folder: str, uid: int) -> dict:
+        """One message of another folder, parsed and sanitized like inbox mail. Not stored."""
+        p = parse_message(self._fetch_full(account_id, folder, uid))
+        return {"uid": uid, "folder": folder, "account_id": account_id, "message_id": p.message_id,
+                "subject": p.subject, "from_name": p.from_name, "from_addr": p.from_addr, "reply_to": p.reply_to,
+                "to_addrs": p.to_addrs, "cc_addrs": p.cc_addrs, "date": p.date, "body_text": p.body_text,
+                "body_html": p.body_html,
+                "attachments": [{"idx": i, "filename": n, "content_type": t, "size": z} for i, n, t, z in p.attachments]}
+
+    def folder_attachment(self, account_id: int, folder: str, uid: int, idx: int) -> tuple[str, bytes]:
+        return extract_attachment(self._fetch_full(account_id, folder, uid), idx)
 
     def move(self, message_id: int, target: str | None) -> dict:
         """Moves a conversation out of the inbox (target=None means the archive): the message
@@ -553,6 +636,12 @@ class MailService:
             client.append(folder, draft.as_bytes(), flags=[b"\\Draft", b"\\Seen"])
         self.db.audit("draft_saved", f"message={message_id} folder={folder}")
         return folder
+
+
+def _aware(d):
+    if isinstance(d, datetime) and d.tzinfo is None:
+        return d.replace(tzinfo=timezone.utc)
+    return d
 
 
 def reply_recipient(m) -> str:

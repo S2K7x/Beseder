@@ -284,6 +284,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     def list_messages(
         category: str = "", account_id: int | None = None, unread: bool = False, q: str = "",
         before: str = "", before_id: int = 0, limit: int = 50, snoozed: bool = False, threads: bool = True,
+        sender: str = "",
     ):
         """One card per conversation (its latest message), newest first. Searches and the
         Snoozed list show single messages. Mail back from snooze comes first on page one."""
@@ -299,6 +300,9 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
                 a.append(account_id)
             if unread:
                 w.append(f"{t}.seen=0")
+            if sender:
+                w.append(f"{t}.from_addr=?")
+                a.append(sender.strip().lower())
             w.append(f"{t}.snoozed_until IS {'NOT ' if snoozed else ''}NULL")
             return w, a
 
@@ -521,6 +525,45 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"ok": True}
+
+    def imap_call(fn, *args):
+        """Runs a read-only IMAP call in a thread and turns its errors into HTTP ones."""
+        async def run():
+            try:
+                return await asyncio.to_thread(fn, *args)
+            except LookupError as e:
+                raise HTTPException(404, str(e))
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            except (IMAPClientError, OSError, PermissionError) as e:
+                raise HTTPException(502, f"IMAP error: {e}")
+        return run()
+
+    def need_account(account_id: int) -> None:
+        if core.mail.get_account(account_id) is None:
+            raise HTTPException(404, "Mailbox not found")
+
+    @app.get("/api/accounts/{account_id}/browse")
+    async def browse(account_id: int, folder: str, before: int = 0, q: str = ""):
+        """Another folder of the mailbox (Archive, All Mail, Sent...), read live and read only."""
+        need_account(account_id)
+        return await imap_call(core.mail.folder_messages, account_id, folder, before, q)
+
+    @app.get("/api/accounts/{account_id}/browse/message")
+    async def browse_message(account_id: int, folder: str, uid: int):
+        need_account(account_id)
+        m = await imap_call(core.mail.folder_message, account_id, folder, uid)
+        m["account_name"] = core.mail.get_account(account_id)["name"]
+        return m
+
+    @app.get("/api/accounts/{account_id}/browse/attachment")
+    async def browse_attachment(account_id: int, folder: str, uid: int, idx: int):
+        need_account(account_id)
+        name, data = await imap_call(core.mail.folder_attachment, account_id, folder, uid, idx)
+        return Response(data, media_type="application/octet-stream", headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name, safe='')}",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        })
 
     @app.get("/api/accounts/{account_id}/folders")
     async def account_folders(account_id: int):
