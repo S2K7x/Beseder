@@ -21,12 +21,14 @@ To start it at boot without Docker, copy `deploy/beseder.service` to
 server. It is skipped unless you point it at one. A throwaway Dovecot works:
 
 ```bash
-docker run -d --name qa-imap -e USER_PASSWORD=qa-pass -p 127.0.0.1:31993:31993 dovecot/dovecot
+docker run -d --name qa-imap -e USER_PASSWORD=qa-pass -p 127.0.0.1:31993:31993 \
+  -v "$PWD/tests/dovecot.conf:/etc/dovecot/dovecot.conf:ro" dovecot/dovecot
 BESEDER_TEST_IMAP=127.0.0.1:31993 python -m pytest -q tests/test_integration_imap.py
 ```
 
-(If the container exits with "Address family not supported", your machine has no IPv6:
-add `listen = *` to Dovecot's config.)
+(`tests/dovecot.conf` is the image's default config with `listen = *`, for machines without
+IPv6.) GitHub Actions runs the whole suite, this server included, plus a Docker build, on
+every push: see `.github/workflows/tests.yml`.
 
 ## Configuration
 

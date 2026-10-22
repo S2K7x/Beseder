@@ -543,6 +543,12 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         if core.mail.get_account(account_id) is None:
             raise HTTPException(404, "Mailbox not found")
 
+    @app.get("/api/accounts/{account_id}/check")
+    async def check_account(account_id: int):
+        """Tests a mailbox (read only) and says what works."""
+        need_account(account_id)
+        return {"items": await imap_call(core.mail.check, account_id)}
+
     @app.get("/api/accounts/{account_id}/browse")
     async def browse(account_id: int, folder: str, before: int = 0, q: str = ""):
         """Another folder of the mailbox (Archive, All Mail, Sent...), read live and read only."""

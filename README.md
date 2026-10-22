@@ -1,5 +1,7 @@
 # Beseder
 
+[![Tests](https://github.com/S2K7x/Beseder/actions/workflows/tests.yml/badge.svg)](https://github.com/S2K7x/Beseder/actions/workflows/tests.yml)
+
 **All your mailboxes in one calm inbox, with your own AI assistant.**
 Gmail, Outlook, iCloud, Yahoo and many more together, on your phone and your computer,
 running on your own Raspberry Pi.

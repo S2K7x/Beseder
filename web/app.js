@@ -1382,15 +1382,34 @@ async function pollOutlook(flowId, interval, box, onAdded) {
 }
 
 function accountsCard(accounts, outlook) {
-  const list = accounts.map((a) => h("div", { class: "row-item" },
-    avatar(a.name, a.email, "sm"),
-    h("div", { class: "grow" },
-      h("div", { class: "t" }, a.name, h("span", { class: "muted", style: "font-weight:400" }, ` · ${providerOf(a.kind).label}`)),
-      a.last_error ? h("div", { class: "s error" }, a.last_error) : h("div", { class: "s" }, `${a.email} · ${fmtAgo(a.last_sync)}`)),
-    h("button", { class: "pill sm", onclick: async () => {
-      if (!confirm(`Remove ${a.email} from Beseder? Nothing is deleted in the mailbox itself.`)) return;
-      try { await api(`/api/accounts/${a.id}`, { method: "DELETE" }); renderSettings(); } catch (e) { toast(e.message); }
-    } }, "Remove")));
+  const list = accounts.map((a) => {
+    const report = h("div", { class: "check-report", hidden: true });
+    const checkBtn = h("button", { class: "pill sm", title: "Test this mailbox (read only)" }, "Check");
+    checkBtn.addEventListener("click", async () => {
+      if (!report.hidden && report.childElementCount) { report.hidden = true; return; }
+      report.hidden = false;
+      report.replaceChildren(h("p", { class: "muted small" }, "Testing the connection…"));
+      const done = busy(checkBtn, "Checking…");
+      try {
+        const r = await api(`/api/accounts/${a.id}/check`);
+        const mark = { ok: "✓", warn: "!", error: "✕" };
+        report.replaceChildren(...r.items.map((it) => h("div", { class: `check-item ${it.status}` },
+          h("span", { class: "mark" }, mark[it.status]),
+          h("div", { class: "grow" }, h("div", { class: "t" }, it.label), h("div", { class: "s" }, it.detail)))));
+      } catch (e) { report.replaceChildren(h("div", { class: "error" }, e.message)); }
+      finally { done(); }
+    });
+    return h("div", { class: "account-block" }, h("div", { class: "row-item" },
+      avatar(a.name, a.email, "sm"),
+      h("div", { class: "grow" },
+        h("div", { class: "t" }, a.name, h("span", { class: "muted", style: "font-weight:400" }, ` · ${providerOf(a.kind).label}`)),
+        a.last_error ? h("div", { class: "s error" }, a.last_error) : h("div", { class: "s" }, `${a.email} · ${fmtAgo(a.last_sync)}`)),
+      checkBtn,
+      h("button", { class: "pill sm", onclick: async () => {
+        if (!confirm(`Remove ${a.email} from Beseder? Nothing is deleted in the mailbox itself.`)) return;
+        try { await api(`/api/accounts/${a.id}`, { method: "DELETE" }); renderSettings(); } catch (e) { toast(e.message); }
+      } }, "Remove")), report);
+  });
   return h("div", { class: "card" },
     h("h2", {}, "Mailboxes"),
     accounts.length ? list : h("p", { class: "muted small" }, "No mailbox yet. Add your first one below."),

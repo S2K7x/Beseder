@@ -89,3 +89,21 @@ def test_sender_filter(client, core):
     add_message(core, acc, 2, from_addr="eve@example.com")
     rows = client.get("/api/messages", params={"sender": "Bob@Example.com"}).json()
     assert [r["from_addr"] for r in rows] == ["bob@example.com"]
+
+
+def test_mailbox_check_reports_in_plain_words(client, core, monkeypatch):
+    acc, server = setup(core, monkeypatch)
+    server.has_capability = lambda cap: cap in ("IDLE",)       # no MOVE
+    server.find_special_folder = lambda flag: None
+    items = {i["label"]: i for i in client.get(f"/api/accounts/{acc}/check").json()["items"]}
+    assert items["Sign-in"]["status"] == "ok" and items["Instant mail"]["status"] == "ok"
+    assert items["Archive and move"]["status"] == "error" and "MOVE" in items["Archive and move"]["detail"]
+    assert items["Sent folder"]["detail"].startswith("Sent Items")
+    assert items["Drafts folder"]["status"] == "error"
+
+    def refused(account):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(core.mail, "connect", refused)
+    (only,) = client.get(f"/api/accounts/{acc}/check").json()["items"]
+    assert only["status"] == "error" and "connection refused" in only["detail"]

@@ -26,6 +26,12 @@ BESEDER_ALLOWED_HOSTS=localhost,127.0.0.1,*.ts.net,mail.example.com
 
 then run `docker compose up -d`.
 
+## Not sure what works on a mailbox?
+
+Open **Settings › Mailboxes** and tap **Check** next to it. Beseder tests the connection
+(read only) and lists what works: sign-in, instant mail, archive and move, Undo, the Sent and
+Drafts folders, and what's synced. Anything orange or red comes with what to do.
+
 ## A mailbox won't connect
 
 | Message | What to do |

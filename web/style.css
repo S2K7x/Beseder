@@ -217,6 +217,16 @@ body[data-view="settings"] .side-col { display: none; }
 .browse-search { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 0 14px; height: 44px;
   border-radius: 999px; background: var(--soft); color: var(--muted); }
 .browse-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--text); }
+.check-report { margin: 4px 0 12px 46px; display: flex; flex-direction: column; gap: 6px; }
+.check-item { display: flex; gap: 10px; align-items: flex-start; font-size: 13.5px; }
+.check-item .mark { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; flex: none;
+  font-size: 12px; font-weight: 700; background: var(--soft); }
+.check-item.ok .mark { background: var(--ok); color: #fff; }
+.check-item.warn .mark { background: #f5a524; color: #fff; }
+.check-item.error .mark { background: var(--danger); color: #fff; }
+.check-item .t { font-weight: 600; }
+.check-item .s { color: var(--muted); overflow-wrap: anywhere; }
+.account-block .row-item { flex-wrap: wrap; }
 .link-strong { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
 .link-strong:hover { text-decoration: underline; }
 .list-head .card-head h2 .avatar { width: 28px; height: 28px; font-size: 11px; }

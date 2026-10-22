@@ -429,6 +429,60 @@ class MailService:
         )
         return {"archive": self._archive_folder(folders), "folders": targets, "browse": self._browsable(folders)}
 
+    def check(self, account_id: int) -> list[dict]:
+        """Read-only health check of a mailbox: what works and what doesn't, in plain words.
+        Each item: {"label", "status": "ok" | "warn" | "error", "detail"}."""
+        account = self.get_account(account_id)
+        out = []
+
+        def item(label, status, detail):
+            out.append({"label": label, "status": status, "detail": detail})
+
+        started = time.monotonic()
+        try:
+            client = self.connect(account)
+        except Exception as e:
+            item("Sign-in", "error", f"{type(e).__name__}: {str(e)[:200]}")
+            return out
+        with client:
+            item("Sign-in", "ok", f"Connected to {account['host']} in {time.monotonic() - started:.1f} s")
+            gmail = client.has_capability(GMAIL)
+            folders = client.list_folders()
+            info = client.select_folder("INBOX", readonly=True)
+            total = int(info.get(b"EXISTS", 0))
+            item("Inbox", "ok", f"{total} email{'s' if total != 1 else ''} on the server")
+            item("Instant mail", "ok" if client.has_capability("IDLE") else "warn",
+                 "New mail shows up within seconds (IMAP IDLE)" if client.has_capability("IDLE")
+                 else "This server has no IMAP IDLE: Beseder checks every few minutes instead")
+            if gmail:
+                all_mail = self._flag_folder(folders, b"\\All")
+                item("Archive", "ok", "Gmail archive (removes the Inbox label)")
+                item("Undo after archiving", "ok" if all_mail else "warn",
+                     f"Uses {all_mail}" if all_mail else "All Mail is hidden from mail apps: in Gmail settings › "
+                     "Labels, tick Show in IMAP for All Mail")
+            else:
+                archive = self._archive_folder(folders)
+                can_move = client.has_capability("MOVE")
+                item("Archive and move", "ok" if can_move else "error",
+                     (f"Archive goes to {archive}" if archive else "An Archive folder will be created the first time")
+                     if can_move else "This server can't move messages (no IMAP MOVE)")
+            sent = self._flag_folder(folders, b"\\Sent") or next(
+                (n for _f, _s, n in folders if n in SENT_NAMES), None)
+            item("Sent folder", "ok" if sent else "warn",
+                 f"{sent}: used for follow-ups and drafts in your style" if sent
+                 else "Not found: follow-ups and drafts in your style won't use what you sent")
+            drafts = client.find_special_folder(DRAFTS) or next(
+                (n for _f, _s, n in folders if n in ("Drafts", "[Gmail]/Drafts", "Brouillons", "INBOX.Drafts")), None)
+            item("Drafts folder", "ok" if drafts else "error",
+                 f"Drafts are saved in {drafts}" if drafts else "Not found: Beseder can't save drafts here")
+        with self.db.conn() as c:
+            local = c.execute("SELECT COUNT(*) FROM messages WHERE account_id=?", (account_id,)).fetchone()[0]
+            sent_n = c.execute("SELECT COUNT(*) FROM sent_messages WHERE account_id=?", (account_id,)).fetchone()[0]
+        item("In Beseder", "ok" if account["last_sync"] and not account["last_error"] else "warn",
+             f"{local} inbox email{'s' if local != 1 else ''} and {sent_n} sent synced"
+             + (f", last sync error: {account['last_error']}" if account["last_error"] else ""))
+        return out
+
     @staticmethod
     def _browsable(folders) -> list[dict]:
         """Every folder that can be opened, with its role, useful ones first."""

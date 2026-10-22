@@ -1,0 +1,43 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: python -m pyflakes beseder tests && node --check web/app.js && node --check web/sw.js
+      - name: Start a throwaway IMAP server (Dovecot, password "qa-pass")
+        run: |
+          docker run -d --name qa-imap -e USER_PASSWORD=qa-pass \
+            -v "$PWD/tests/dovecot.conf:/etc/dovecot/dovecot.conf:ro" -p 127.0.0.1:31993:31993 \
+            dovecot/dovecot@sha256:43c14def08a57f25107593cbcf64a0a6fbae84a7b9de7aa038513c9b21e91914
+          for i in $(seq 30); do (echo > /dev/tcp/127.0.0.1/31993) 2>/dev/null && exit 0; sleep 1; done
+          docker logs qa-imap; exit 1
+      - name: Tests (unit + real IMAP server)
+        run: python -m pytest -q
+        env:
+          BESEDER_TEST_IMAP: 127.0.0.1:31993
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image and check it starts
+        run: |
+          docker build -t beseder .
+          docker run -d --name beseder -p 127.0.0.1:8000:8000 beseder
+          for i in $(seq 30); do curl -sf localhost:8000/api/health && exit 0; sleep 1; done
+          docker logs beseder; exit 1

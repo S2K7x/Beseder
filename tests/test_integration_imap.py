@@ -358,3 +358,10 @@ def test_browse_and_search_archived_mail(env):
     s.logout()
     with core.db.conn() as c:
         assert c.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+
+
+def test_mailbox_check_on_a_real_server(env):
+    _core, client, account_id, _user = env
+    items = {i["label"]: i["status"] for i in client.get(f"/api/accounts/{account_id}/check").json()["items"]}
+    assert items["Sign-in"] == items["Instant mail"] == items["Archive and move"] == "ok"
+    assert items["Sent folder"] == items["Drafts folder"] == "ok"
