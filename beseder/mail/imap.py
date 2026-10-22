@@ -1,11 +1,13 @@
 """IMAP sync.
 
-Allowed writes on the server (see CLAUDE.md): mark as read, add a draft.
-Nothing else: no sending, no deleting, no moving.
+Allowed writes on the server (see CLAUDE.md), always on a user click: mark as read, add a
+draft, move a message out of the inbox (archive or a folder the user picks, never the
+trash). No sending, no deleting.
 """
 
 import logging
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
@@ -18,7 +20,7 @@ from ..config import Config
 from ..crypto import Vault
 from ..db import DB, now_iso
 from .oauth_ms import MicrosoftOAuth
-from .parse import parse_message
+from .parse import extract_attachment, parse_message
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +42,10 @@ class LoginRejected(Exception):
 
 FETCH_CHUNK = 25
 FLAG_REFRESH_LIMIT = 1000
+IDLE_RENEW = 25 * 60  # servers drop IDLE after ~29 minutes (RFC 2177)
+ARCHIVE_NAMES = ("Archive", "Archives", "INBOX.Archive")
+# Folders a user may move mail into. Trash is left out on purpose: no deleting.
+NOT_A_TARGET = {b"\\Noselect", b"\\NonExistent", b"\\Trash", b"\\Drafts"}
 
 
 class MailService:
@@ -123,7 +129,8 @@ class MailService:
                 c.execute("DELETE FROM messages WHERE account_id=?", (account["id"],))
             last_uid = 0
 
-        if last_uid == 0:
+        initial = last_uid == 0  # first import: nothing to notify about
+        if initial:
             since = date.today() - timedelta(days=self.config.initial_days)
             uids = sorted(client.search(["SINCE", since]))[-self.config.initial_max :]
         else:
@@ -141,7 +148,7 @@ class MailService:
                 fetched.update(client.fetch(small, ["BODY.PEEK[]", "FLAGS", "INTERNALDATE"]))
             if big:
                 fetched.update(client.fetch(big, ["BODY.PEEK[HEADER]", "FLAGS", "INTERNALDATE"]))
-            rows = []
+            rows, attachments = [], {}
             for uid in chunk:
                 data = fetched.get(uid)
                 if not data:
@@ -155,15 +162,24 @@ class MailService:
                 rows.append(
                     (account["id"], uid, p.message_id, p.in_reply_to, p.refs, p.subject, p.from_name,
                      p.from_addr, p.reply_to, p.to_addrs, p.cc_addrs, p.date, p.snippet, p.body_text,
-                     p.body_html, int(p.list_unsubscribe), int(p.truncated), seen)
+                     p.body_html, int(p.list_unsubscribe), int(p.truncated), seen, int(initial or seen))
                 )
+                if p.attachments:
+                    attachments[uid] = p.attachments
             with self.db.conn() as c:
                 c.executemany(
                     "INSERT OR IGNORE INTO messages(account_id, uid, message_id, in_reply_to, refs, subject,"
                     " from_name, from_addr, reply_to, to_addrs, cc_addrs, date, snippet, body_text, body_html,"
-                    " list_unsubscribe, truncated, seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " list_unsubscribe, truncated, seen, notified) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
+                for uid, items in attachments.items():
+                    mid = c.execute("SELECT id FROM messages WHERE account_id=? AND uid=?",
+                                    (account["id"], uid)).fetchone()[0]
+                    c.executemany(
+                        "INSERT OR IGNORE INTO attachments(message_id, idx, filename, content_type, size)"
+                        " VALUES(?,?,?,?,?)", [(mid, *item) for item in items],
+                    )
                 c.execute(
                     "UPDATE accounts SET uidvalidity=?, last_uid=MAX(last_uid, ?) WHERE id=?",
                     (uidvalidity, chunk[-1], account["id"]),
@@ -237,6 +253,112 @@ class MailService:
                 self._send_seen(client, account_id)
         except (IMAPClientError, OSError, PermissionError) as e:
             log.warning("Could not mark messages as read, will retry at the next sync: %s", type(e).__name__)
+
+    def _message(self, message_id: int):
+        with self.db.conn() as c:
+            m = c.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+        if m is None:
+            raise LookupError("Message not found")
+        return m
+
+    def download_attachment(self, message_id: int, idx: int) -> tuple[str, bytes]:
+        """Fetches the message again from the server and returns one attachment."""
+        m = self._message(message_id)
+        with self.connect(self.get_account(m["account_id"])) as client:
+            client.select_folder("INBOX", readonly=True)
+            data = client.fetch([m["uid"]], ["BODY.PEEK[]"]).get(m["uid"])
+        if not data:
+            raise LookupError("This message is no longer in the inbox")
+        return extract_attachment(data[b"BODY[]"], idx)
+
+    @staticmethod
+    def _archive_folder(folders) -> str | None:
+        by_flag = {flag: name for flags, _sep, name in folders for flag in flags}
+        # \Archive (iCloud, Outlook, Yahoo...), or \All for Gmail where archiving = leaving the inbox.
+        for flag in (b"\\Archive", b"\\All"):
+            if flag in by_flag:
+                return by_flag[flag]
+        names = {name for _flags, _sep, name in folders}
+        return next((n for n in ARCHIVE_NAMES if n in names), None)
+
+    def folders(self, account_id: int) -> dict:
+        """Folders the user can move mail into, and which one is the archive."""
+        with self.connect(self.get_account(account_id)) as client:
+            folders = client.list_folders()
+        targets = sorted(
+            name for flags, _sep, name in folders
+            if name.upper() != "INBOX" and not (set(flags) & NOT_A_TARGET)
+        )
+        return {"archive": self._archive_folder(folders), "folders": targets}
+
+    def move(self, message_id: int, target: str | None) -> dict:
+        """Moves a message out of the inbox (target=None means the archive). Never to the trash."""
+        m = self._message(message_id)
+        account = self.get_account(m["account_id"])
+        with self.connect(account) as client:
+            folders = client.list_folders()
+            if target is None:
+                target = self._archive_folder(folders)
+                if target is None:
+                    client.create_folder("Archive")
+                    target = "Archive"
+            else:
+                flags = next((set(f) for f, _sep, name in folders if name == target), None)
+                if flags is None or flags & NOT_A_TARGET or target.upper() == "INBOX":
+                    raise ValueError("You can't move mail to this folder")
+            if not client.has_capability("MOVE"):
+                raise ValueError("This mail server can't move messages")
+            client.select_folder("INBOX")
+            client.move([m["uid"]], target)
+        with self.db.conn() as c:
+            c.execute("DELETE FROM messages WHERE id=?", (message_id,))
+        self.db.audit("moved", f"message={message_id} folder={target}")
+        return {"folder": target, "account_id": account["id"], "message_id": m["message_id"] or ""}
+
+    def restore(self, account_id: int, folder: str, message_id_header: str) -> bool:
+        """Undo a move: finds the message by its Message-ID and puts it back in the inbox."""
+        if not message_id_header:
+            return False
+        with self.connect(self.get_account(account_id)) as client:
+            client.select_folder(folder)
+            uids = client.search(["HEADER", "Message-ID", message_id_header])
+            if not uids:
+                return False
+            client.move(uids[-1:], "INBOX")
+        self.db.audit("restored", f"account={account_id} folder={folder}")
+        return True
+
+    # --- push from the server (IDLE) --------------------------------------
+    def watch_inbox(self, account_id: int, on_new, stop: threading.Event) -> None:
+        """Waits on the server for new mail (IMAP IDLE) and calls on_new() as soon as some arrives.
+        Runs in its own thread; reconnects with backoff. Returns if the server has no IDLE."""
+        backoff = 30
+        while not stop.is_set():
+            account = self.get_account(account_id)
+            if account is None:
+                return
+            try:
+                with self.connect(account) as client:
+                    if not client.has_capability("IDLE"):
+                        log.info("Account %s has no IMAP IDLE, using periodic sync only", account_id)
+                        return
+                    client.select_folder("INBOX", readonly=True)
+                    backoff = 30
+                    started = time.monotonic()
+                    client.idle()
+                    while not stop.is_set() and time.monotonic() - started < IDLE_RENEW:
+                        responses = client.idle_check(timeout=30)
+                        # New mail (EXISTS), or a message read or deleted elsewhere (FETCH, EXPUNGE).
+                        if any(r[1] in (b"EXISTS", b"EXPUNGE", b"FETCH") for r in responses if len(r) > 1):
+                            client.idle_done()
+                            on_new()
+                            client.idle()
+                    client.idle_done()
+            except Exception as e:  # network drop, expired token... try again later
+                log.info("IDLE for account %s stopped (%s), retrying in %ss", account_id, type(e).__name__, backoff)
+                if stop.wait(backoff):
+                    return
+                backoff = min(backoff * 2, 600)
 
     def save_draft(self, message_id: int, body: str) -> str:
         """Adds a reply to the account's Drafts folder. Sends nothing."""

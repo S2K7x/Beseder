@@ -3,10 +3,11 @@
 import asyncio
 import contextlib
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from imapclient.exceptions import IMAPClientError
 from pydantic import BaseModel
@@ -87,6 +88,29 @@ class OnboardedIn(BaseModel):
     done: bool = True
 
 
+class MoveIn(BaseModel):
+    folder: str | None = None  # None = the archive
+
+
+class RestoreIn(BaseModel):
+    folder: str
+    message_id: str
+
+
+class PushSubscriptionIn(BaseModel):
+    subscription: dict
+    label: str = ""
+
+
+class EndpointIn(BaseModel):
+    endpoint: str
+
+
+class PushSettingsIn(BaseModel):
+    mode: str
+    preview: bool = True
+
+
 class ProfileIn(BaseModel):
     name: str = ""
     summary_language: str = "English"
@@ -105,7 +129,10 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     @contextlib.asynccontextmanager
     async def lifespan(app):
         task = asyncio.create_task(core.scheduler()) if config.run_scheduler else None
+        if config.run_scheduler and config.idle:
+            core.start_watchers(asyncio.get_running_loop())
         yield
+        core.stop_watchers()
         if task:
             task.cancel()
 
@@ -168,6 +195,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             "ai_configured": cfg.configured,
             "ai_label": presets.get(cfg.preset, {}).get("label", ""),
             "syncing": core.status["syncing"],
+            "version": core.status["version"],
             "triage_error": core.status["triage_error"],
             "my_name": core.db.get_setting("my_name", ""),
             "summary_language": core.db.get_setting("summary_language", "English"),
@@ -227,7 +255,93 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         m["reply_to_display"] = reply_recipient(m)
         # Sanitized at import too; doing it again here covers mail stored by an older sanitizer.
         m["body_html"] = sanitize_html(m["body_html"]) if m["body_html"] else ""
+        with core.db.conn() as c:
+            m["attachments"] = [dict(r) for r in c.execute(
+                "SELECT idx, filename, content_type, size FROM attachments WHERE message_id=? ORDER BY idx",
+                (message_id,))]
         return m
+
+    @app.get("/api/messages/{message_id}/attachments/{idx}")
+    async def download_attachment(message_id: int, idx: int):
+        get_message(message_id)
+        try:
+            name, data = await asyncio.to_thread(core.mail.download_attachment, message_id, idx)
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        except (IMAPClientError, OSError, PermissionError) as e:
+            raise HTTPException(502, f"IMAP error: {e}")
+        # Always a download, never rendered: an HTML or SVG attachment must not run in Beseder's page.
+        return Response(data, media_type="application/octet-stream", headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        })
+
+    @app.post("/api/messages/{message_id}/move")
+    async def move_message(message_id: int, body: MoveIn):
+        get_message(message_id)
+        try:
+            return await asyncio.to_thread(core.mail.move, message_id, body.folder)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        except (IMAPClientError, OSError, PermissionError) as e:
+            raise HTTPException(502, f"IMAP error: {e}")
+
+    @app.post("/api/accounts/{account_id}/restore")
+    async def restore_message(account_id: int, body: RestoreIn):
+        if core.mail.get_account(account_id) is None:
+            raise HTTPException(404, "Mailbox not found")
+        try:
+            ok = await asyncio.to_thread(core.mail.restore, account_id, body.folder, body.message_id)
+        except (IMAPClientError, OSError, PermissionError) as e:
+            raise HTTPException(502, f"IMAP error: {e}")
+        if not ok:
+            raise HTTPException(404, "Could not find the message to put back")
+        spawn(core.sync_one(account_id))
+        return {"ok": True}
+
+    @app.get("/api/accounts/{account_id}/folders")
+    async def account_folders(account_id: int):
+        if core.mail.get_account(account_id) is None:
+            raise HTTPException(404, "Mailbox not found")
+        try:
+            return await asyncio.to_thread(core.mail.folders, account_id)
+        except (IMAPClientError, OSError, PermissionError) as e:
+            raise HTTPException(502, f"IMAP error: {e}")
+
+    # --- notifications ------------------------------------------------------
+    @app.get("/api/push")
+    def push_info():
+        return {"public_key": core.push.public_key(), "devices": core.push.count(), **core.push_settings()}
+
+    @app.post("/api/push/subscribe")
+    def push_subscribe(body: PushSubscriptionIn):
+        try:
+            core.push.subscribe(body.subscription, body.label)
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid subscription: {e}")
+        return {"devices": core.push.count()}
+
+    @app.post("/api/push/unsubscribe")
+    def push_unsubscribe(body: EndpointIn):
+        core.push.unsubscribe(body.endpoint)
+        return {"devices": core.push.count()}
+
+    @app.put("/api/push/settings")
+    def push_settings(body: PushSettingsIn):
+        try:
+            core.set_push_settings(body.mode, body.preview)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return core.push_settings()
+
+    @app.post("/api/push/test")
+    async def push_test():
+        sent = await core.push.send({"title": "Beseder", "body": "Notifications work.", "url": "/#/", "tag": "test"})
+        if not sent:
+            raise HTTPException(400, "No device received it. Turn notifications on from this device first.")
+        return {"sent": sent}
 
     @app.post("/api/messages/{message_id}/read")
     async def mark_read(message_id: int):
@@ -433,6 +547,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         except (IMAPClientError, OSError) as e:
             raise HTTPException(400, f"Cannot reach {host}:{port} ({e}). Check the address and the server name.")
         account_id = insert_account(body.kind, body.name, email, host, port, username, {"password": password})
+        core.watch(account_id)
         spawn(core.sync_all())
         return {"id": account_id}
 
@@ -458,6 +573,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         secret = {"client_id": flow.client_id, "tenant": flow.tenant, "refresh_token": data["refresh_token"]}
         p = providers.PROVIDERS["outlook"]
         account_id = insert_account("outlook", flow.name, flow.email, p["host"], p["port"], flow.email, secret)
+        core.watch(account_id)
         spawn(core.sync_all())
         return {"status": "done", "id": account_id}
 
@@ -468,6 +584,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     @app.delete("/api/accounts/{account_id}")
     def delete_account(account_id: int):
         """Removes the account from Beseder (local data only, nothing is deleted on the server)."""
+        core.unwatch(account_id)
         with core.db.conn() as c:
             c.execute("DELETE FROM accounts WHERE id=?", (account_id,))
         return {"ok": True}

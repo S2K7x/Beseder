@@ -84,6 +84,16 @@ The last command shows your address, for example
 
 You can run the assistant again any time from **Settings › Help › Run setup again**.
 
+## 5. Turn on notifications
+
+In Beseder, open **Settings › Notifications** and tap **Turn on for this device**, then
+**Send a test**. By default you are notified about **important** emails only (this needs
+auto-triage on); you can switch to every new email, or off.
+
+On iPhone, notifications need iOS 16.4 or later and only work when Beseder is opened from
+its **Home Screen** icon (step 4), not from a Safari tab. Do it once on each device you
+want notified.
+
 ## Keeping it up to date
 
 ```bash

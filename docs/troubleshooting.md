@@ -52,6 +52,27 @@ A mailbox with a problem shows the error in red in the **Mailboxes** card.
 | *Command not found: claude* | Rebuild with `WITH_CLAUDE_CLI=true` ([guide](ai.md#claude-code)). |
 | Claude Code: *not logged in* | Run `docker compose exec -it beseder claude` and sign in. |
 
+## Notifications don't arrive
+
+- On iPhone: Beseder must be opened from its Home Screen icon (not Safari), on iOS 16.4+.
+  Then Settings › Notifications › **Turn on for this device**.
+- Tap **Send a test**. If it says no device received it, turn notifications off and on
+  again on that device.
+- Check that notifications for Beseder are allowed in the phone's settings.
+- "Important emails only" needs auto-triage on: without an AI, choose **Every new email**.
+- The Pi must be able to reach the internet (Apple's and Google's push services).
+
+## New mail takes a few minutes to show up
+
+Beseder keeps a live connection to each inbox (IMAP IDLE) and shows new mail within
+seconds. A few providers don't support it: Beseder then checks every 5 minutes. The logs
+say "has no IMAP IDLE" for those mailboxes.
+
+## Archive or Move says the server can't move messages
+
+Your provider doesn't support the IMAP MOVE command. Archive the email from your usual mail
+app instead.
+
 ## Emails aren't being sorted
 
 - Is **Auto-triage** on? It's the switch in the **Categories** card.

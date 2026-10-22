@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import threading
+from datetime import datetime, timedelta, timezone
 
 from .ai.providers import AIConfig, AIError, Provider, make_provider, presets_for
 from .ai.tasks import CATEGORIES, triage
@@ -10,6 +12,8 @@ from .crypto import Vault
 from .db import DB, now_iso
 from .mail.imap import MailService
 from .mail.oauth_ms import MicrosoftOAuth
+from .push import MODES as PUSH_MODES
+from .push import PushService
 
 log = logging.getLogger(__name__)
 
@@ -25,12 +29,17 @@ class Beseder:
         self.vault = Vault(config.key_path)
         self.mail = MailService(self.db, self.vault, config, oauth)
         self.sync_lock = asyncio.Lock()
-        self.status = {"syncing": False, "triage_error": None}
+        # "version" goes up whenever the mail list changes, so open pages know to refresh.
+        self.status = {"syncing": False, "triage_error": None, "version": 0}
         self._seen_flush: set[int] = set()
+        self.push = PushService(self.db, self.vault)
+        self._watchers: dict[int, threading.Event] = {}
+        self._sync_soon: set[int] = set()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._provider: Provider | None = None
         self._provider_key = None
 
-    # --- IA -------------------------------------------------------------
+    # --- AI -------------------------------------------------------------
     def ai_config(self) -> AIConfig:
         stored = self.db.get_setting("ai", {}) or {}
         key_enc = self.db.get_setting("ai_key")
@@ -163,10 +172,123 @@ class Beseder:
                 new = 0
                 for account_id in ids:
                     new += await asyncio.to_thread(self.mail.sync_account, account_id)
-                await self.run_triage()
+                await self.after_sync()
+                self.status["version"] += 1
                 return new
             finally:
                 self.status["syncing"] = False
+
+    async def sync_one(self, account_id: int) -> int:
+        """Syncs one mailbox now (new mail announced by IDLE). Waits for a running sync."""
+        async with self.sync_lock:
+            self.status["syncing"] = True
+            try:
+                new = await asyncio.to_thread(self.mail.sync_account, account_id)
+                await self.after_sync()
+                self.status["version"] += 1
+                return new
+            finally:
+                self.status["syncing"] = False
+
+    async def after_sync(self) -> None:
+        await self.run_triage()
+        try:
+            await self.notify_new()
+        except Exception:
+            log.exception("Could not send notifications")
+
+    # --- notifications -----------------------------------------------------
+    async def notify_new(self) -> int:
+        """Sends a push for new unread mail, once triage has had its say. Returns how many were announced."""
+        mode = self.db.get_setting("push_mode", "important")
+        with self.db.conn() as c:
+            rows = [dict(r) for r in c.execute(
+                "SELECT m.id, m.category, m.subject, m.from_name, m.from_addr, m.date, m.seen, a.name AS account"
+                " FROM messages m JOIN accounts a ON a.id=m.account_id WHERE m.notified=0 ORDER BY m.date"
+            )]
+        if not rows:
+            return 0
+        old = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+        announce, done = [], []
+        for r in rows:
+            if mode == "all" and not r["seen"]:
+                announce.append(r)
+            elif mode == "important" and not r["seen"] and r["category"] == "important":
+                announce.append(r)
+            elif mode == "important" and r["category"] is None and self.auto_triage and r["date"] > old:
+                continue  # not sorted yet: decide at the next pass
+            done.append(r["id"])
+        done += [r["id"] for r in announce]
+        with self.db.conn() as c:
+            c.executemany("UPDATE messages SET notified=1 WHERE id=?", [(i,) for i in set(done)])
+        if announce and self.push.count():
+            await self.push.send(self._notification(announce), urgency="high")
+        return len(announce)
+
+    def _notification(self, mails: list[dict]) -> dict:
+        preview = self.db.get_setting("push_preview", True)
+        if len(mails) == 1:
+            m = mails[0]
+            return {
+                "title": (m["from_name"] or m["from_addr"]) if preview else "New email",
+                "body": (m["subject"] or "(no subject)") if preview else f"In {m['account']}",
+                "url": f"/#/m/{m['id']}", "tag": f"m{m['id']}",
+            }
+        senders = ", ".join(dict.fromkeys(m["from_name"] or m["from_addr"] for m in mails))
+        return {
+            "title": f"{len(mails)} new emails",
+            "body": senders[:180] if preview else "Open Beseder to read them",
+            "url": "/#/", "tag": "batch",
+        }
+
+    def push_settings(self) -> dict:
+        return {"mode": self.db.get_setting("push_mode", "important"),
+                "preview": self.db.get_setting("push_preview", True)}
+
+    def set_push_settings(self, mode: str, preview: bool) -> None:
+        if mode not in PUSH_MODES:
+            raise ValueError("Unknown notification mode")
+        self.db.set_setting("push_mode", mode)
+        self.db.set_setting("push_preview", bool(preview))
+
+    # --- instant mail (IMAP IDLE) -------------------------------------------
+    def start_watchers(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        with self.db.conn() as c:
+            for (account_id,) in c.execute("SELECT id FROM accounts").fetchall():
+                self.watch(account_id)
+
+    def watch(self, account_id: int) -> None:
+        if self._loop is None or account_id in self._watchers:
+            return
+        stop = threading.Event()
+        self._watchers[account_id] = stop
+
+        def on_new() -> None:  # called from the IDLE thread
+            asyncio.run_coroutine_threadsafe(self._sync_soon_once(account_id), self._loop)
+
+        threading.Thread(target=self.mail.watch_inbox, args=(account_id, on_new, stop),
+                         name=f"idle-{account_id}", daemon=True).start()
+
+    def unwatch(self, account_id: int) -> None:
+        stop = self._watchers.pop(account_id, None)
+        if stop:
+            stop.set()
+
+    def stop_watchers(self) -> None:
+        for account_id in list(self._watchers):
+            self.unwatch(account_id)
+
+    async def _sync_soon_once(self, account_id: int) -> None:
+        # Servers often send several events in a row: one sync covers them all.
+        if account_id in self._sync_soon:
+            return
+        self._sync_soon.add(account_id)
+        try:
+            await asyncio.sleep(2)
+        finally:
+            self._sync_soon.discard(account_id)
+        await self.sync_one(account_id)
 
     async def scheduler(self) -> None:
         while True:

@@ -69,7 +69,31 @@ CREATE TABLE IF NOT EXISTS audit_log (
     action TEXT NOT NULL,
     detail TEXT NOT NULL DEFAULT ''
 );
+
+-- File names and sizes only. The content is fetched from the server when downloaded.
+CREATE TABLE IF NOT EXISTS attachments (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    idx INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    PRIMARY KEY (message_id, idx)
+);
+
+-- Browsers that asked for notifications.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    keys TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
 """
+
+# Columns added after the first release: (table, column, definition).
+MIGRATIONS = [
+    # 1 = nothing to notify about (everything imported before notifications existed).
+    ("messages", "notified", "INTEGER NOT NULL DEFAULT 1"),
+]
 
 
 def now_iso() -> str:
@@ -83,6 +107,10 @@ class DB:
         with self.conn() as c:
             c.execute("PRAGMA journal_mode=WAL")
             c.executescript(SCHEMA)
+            for table, column, definition in MIGRATIONS:
+                existing = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+                if column not in existing:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @contextmanager
     def conn(self):

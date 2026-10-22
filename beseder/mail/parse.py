@@ -2,7 +2,7 @@
 
 import html as html_lib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email import policy
 from email.message import EmailMessage
@@ -82,6 +82,36 @@ class ParsedMessage:
     body_html: str
     list_unsubscribe: bool
     truncated: bool
+    attachments: list = field(default_factory=list)  # [(idx, filename, content_type, size)]
+
+
+def _attachment_parts(msg: EmailMessage) -> list:
+    try:
+        return list(msg.iter_attachments())
+    except Exception:
+        return []
+
+
+def list_attachments(msg: EmailMessage) -> list[tuple[int, str, str, int]]:
+    out = []
+    for idx, part in enumerate(_attachment_parts(msg)):
+        try:
+            data = part.get_payload(decode=True) or b""
+        except Exception:
+            data = b""
+        name = part.get_filename() or f"attachment-{idx + 1}"
+        out.append((idx, name[:200], part.get_content_type(), len(data)))
+    return out
+
+
+def extract_attachment(raw: bytes, idx: int) -> tuple[str, bytes]:
+    """Returns (filename, bytes) of one attachment, using the same numbering as list_attachments."""
+    msg = BytesParser(policy=policy.default).parsebytes(raw)
+    parts = _attachment_parts(msg)
+    if not 0 <= idx < len(parts):
+        raise LookupError("Attachment not found")
+    part = parts[idx]
+    return (part.get_filename() or f"attachment-{idx + 1}"), (part.get_payload(decode=True) or b"")
 
 
 def parse_message(raw: bytes, fallback_date: datetime | None = None, headers_only: bool = False) -> ParsedMessage:
@@ -140,4 +170,5 @@ def parse_message(raw: bytes, fallback_date: datetime | None = None, headers_onl
         body_html=sanitize_html(html) if html else "",
         list_unsubscribe=bool(header("list-unsubscribe")),
         truncated=headers_only,
+        attachments=[] if headers_only else list_attachments(msg),
     )

@@ -7,9 +7,11 @@ running on your own Raspberry Pi.
 ![Beseder on desktop](docs/images/desktop.png)
 
 - **Sorts your mail** into Important, Notifications, Newsletters, Promotions, Receipts and Other.
+- **Instant and notified**: new mail shows up within seconds, with a notification for the important ones.
+- **Archive, move, attachments**: process your inbox, with an Undo. The trash is never one tap away.
 - **Briefs you**: one tap and the AI tells you what matters in your unread mail.
 - **Drafts replies**, only when you ask. You read it and send it yourself.
-- **Never acts alone**: the AI cannot send, delete, move or forward anything.
+- **Never acts alone**: the AI cannot send, delete, move or forward anything. Only you can.
 - **Free to run**: use a free AI (OpenRouter, Google), a local one (Ollama) or your Claude subscription.
 
 ## Quick start (5 minutes)

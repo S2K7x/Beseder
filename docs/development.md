@@ -39,6 +39,7 @@ All settings are environment variables:
 | `BESEDER_ALLOWED_HOSTS` | `localhost,127.0.0.1,*.ts.net` | Accepted values for the Host header |
 | `BESEDER_SYNC_INTERVAL` | `300` | Seconds between two syncs |
 | `BESEDER_INITIAL_DAYS` / `BESEDER_INITIAL_MAX` | `30` / `500` | Depth of the first import per mailbox |
+| `BESEDER_IDLE` | `1` | `0` turns off instant mail (IMAP IDLE) and keeps the periodic sync only |
 | `BESEDER_MAX_MESSAGE_BYTES` | `10485760` | Above this size, only headers are imported |
 
 ## Code layout

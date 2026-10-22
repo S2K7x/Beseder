@@ -11,8 +11,10 @@ Everything (UI, API messages, prompts, docs, comments) is in English.
    with its answer. Never add tool calling, MCP access or network access for the AI.
    For the `claude_cli` provider, keep `--tools ""` and `--strict-mcp-config`.
 2. **No sending, no deleting.** The code has no SMTP and never calls
-   `delete_messages`/`expunge`. The only allowed IMAP writes are: mark as read, and
-   append a draft to the Drafts folder (always triggered by a user click).
+   `delete_messages`/`expunge`. The only allowed IMAP writes are: mark as read, append a
+   draft to the Drafts folder, and move a message out of the inbox (archive or a folder
+   the user picks, **never the trash**, with an Undo). Writes are always triggered by a
+   user click, never by the AI.
 3. **Message content is untrusted data.** Always pass it to the AI inside a delimited
    block (see `beseder/ai/tasks.py`), and **validate** every AI output: category in the
    enum, ids present in the batch that was sent, otherwise ignore it.
@@ -38,6 +40,9 @@ Everything (UI, API messages, prompts, docs, comments) is in English.
 - `beseder/mail/providers.py`: every supported mail provider (server, steps shown to the user).
   Adding a provider = one entry there + a section in `docs/mailboxes.md`.
 - `beseder/ai/`: pluggable AI providers + tasks (triage, brief, draft)
+- `beseder/push.py`: Web Push (VAPID + aes128gcm, written with `cryptography`, no extra
+  dependency). Notifications are decided in `Beseder.notify_new()` after triage.
+- IMAP IDLE: one thread per mailbox (`MailService.watch_inbox`) triggers `sync_one`.
 - `beseder/main.py`: API routes
 - `web/`: the PWA (three columns on desktop, bottom tab bar on phones)
 - The first-run setup assistant is in `web/app.js` (`renderWelcome`); it reuses the guided

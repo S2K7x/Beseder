@@ -28,6 +28,8 @@ class Config:
     )
     # Set by the Docker image. Changes a few defaults (e.g. where Ollama lives).
     in_docker: bool = field(default_factory=lambda: os.environ.get("BESEDER_IN_DOCKER", "0") == "1")
+    # Instant mail: keep an IMAP IDLE connection per mailbox (the periodic sync stays as a fallback).
+    idle: bool = field(default_factory=lambda: os.environ.get("BESEDER_IDLE", "1") == "1")
     run_scheduler: bool = field(default_factory=lambda: os.environ.get("BESEDER_SCHEDULER", "1") == "1")
 
     @property

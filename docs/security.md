@@ -6,9 +6,12 @@ protects you, in plain words.
 ## The AI cannot act
 
 The AI has **no tools**. It receives text and returns text; Beseder's own code decides
-what to do with the answer, and the code has no way to send, delete, move or forward
+what to do with the answer, and nothing the AI says can send, delete, move or forward
 mail. There is no "send" button anywhere in Beseder: drafts go to your Drafts folder and
 you send them yourself, from your usual mail app.
+
+Beseder itself only changes your mailbox when **you** tap a button: mark as read, save a
+draft, archive or move to a folder (never to the trash, and with an Undo).
 
 ## Emails can't take over the AI
 
@@ -31,6 +34,15 @@ At worst, a booby-trapped email gets filed in the wrong category or skews a brie
 - Remote images are blocked until you tap the image button, so tracking pixels don't
   tell senders when you open their email.
 - AI answers are shown as plain text, never as HTML.
+- Attachments are always downloaded as files, never opened inside Beseder, so an HTML or
+  SVG attachment can't run anything.
+
+## Notifications are end-to-end encrypted
+
+Notifications go through Apple, Google or Mozilla's push service, but they are encrypted
+for your device (Web Push standard): those services see that a notification was sent, not
+what it says. If you'd rather not show senders and subjects on your lock screen, turn off
+**Show the sender and subject** in Settings › Notifications.
 
 ## Your passwords are encrypted
 

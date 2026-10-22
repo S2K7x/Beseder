@@ -149,11 +149,15 @@ Beseder doesn't support Proton for now.
 
 ## What Beseder does with your mailbox
 
-- It syncs your **inbox** every 5 minutes (the last 30 days on the first sync).
+- It watches your **inbox** and shows new mail within seconds (IMAP IDLE), with a full
+  check every 5 minutes as a safety net. The first sync imports the last 30 days.
 - It marks an email as read when you open it, like any mail app.
 - It saves a draft in your **Drafts** folder when you tap the save arrow.
-- That's all: no sending, no deleting, no moving. Removing a mailbox from Beseder deletes
-  nothing in the mailbox itself.
+- It moves an email out of the inbox when **you** tap Archive or Move (with an Undo).
+  Gmail's archive is "All Mail"; other providers use their Archive folder, created if
+  missing. The trash is never offered.
+- That's all: no sending, no deleting. Removing a mailbox from Beseder deletes nothing in
+  the mailbox itself. Attachments are downloaded from your mailbox when you open them.
 
 To revoke access at any time, delete the app password at your provider, or for Microsoft
 remove Beseder at [account.live.com/consent/Manage](https://account.live.com/consent/Manage).

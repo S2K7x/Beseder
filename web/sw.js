@@ -1,5 +1,5 @@
-// Service worker: caches the app shell only. Emails (/api) are never cached.
-const CACHE = "beseder-v2";
+// Service worker: caches the app shell (never emails) and shows push notifications.
+const CACHE = "beseder-v3";
 const SHELL = ["/", "/app.js", "/style.css", "/manifest.webmanifest", "/icon.svg", "/icon-192.png"];
 
 self.addEventListener("install", (e) => {
@@ -25,4 +25,32 @@ self.addEventListener("fetch", (e) => {
       })
       .catch(() => caches.match(e.request))
   );
+});
+
+// The payload is decrypted by the browser; it only ever contains a title, a line and a link.
+self.addEventListener("push", (e) => {
+  let data = {};
+  try { data = e.data ? e.data.json() : {}; } catch { /* not JSON: show a generic notification */ }
+  e.waitUntil(self.registration.showNotification(String(data.title || "Beseder"), {
+    body: String(data.body || "New email"),
+    tag: String(data.tag || "beseder"),
+    icon: "/icon-192.png",
+    badge: "/icon-192.png",
+    data: { url: typeof data.url === "string" && data.url.startsWith("/") ? data.url : "/" },
+  }));
+});
+
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const url = e.notification.data?.url || "/";
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const w of wins) {
+      if (new URL(w.url).origin === location.origin) {
+        await w.focus();
+        return w.navigate(url);
+      }
+    }
+    return self.clients.openWindow(url);
+  })());
 });

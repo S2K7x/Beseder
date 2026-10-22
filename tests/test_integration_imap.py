@@ -151,3 +151,66 @@ def test_wrong_password_is_rejected(env):
     r = client.post("/api/accounts", json={"kind": "imap", "email": "x@example.com", "password": "nope",
                                            "host": host, "port": int(port)})
     assert r.status_code == 400 and "Login rejected" in r.json()["detail"]
+
+
+def test_attachments_archive_undo_and_folders(env):
+    core, client, account_id, user = env
+    s = server(user)
+    with_file = mail(1)
+    m = EmailMessage()
+    m["From"], m["Subject"], m["Message-ID"] = "Bob <bob@example.com>", "Invoice", "<qa-att@example.com>"
+    m.set_content("See attached")
+    m.add_attachment(b"%PDF-1.4 fake", maintype="application", subtype="pdf", filename="facture été.pdf")
+    s.append("INBOX", m.as_bytes())
+    s.append("INBOX", with_file)
+    assert core.mail.sync_account(account_id) == 2
+    rows = {r["message_id"]: r for r in inbox_rows(core).values()}
+    inv = rows["<qa-att@example.com>"]
+
+    # Attachment listed, then downloaded as a file (never rendered).
+    meta = client.get(f"/api/messages/{inv['id']}").json()["attachments"]
+    assert meta == [{"idx": 0, "filename": "facture été.pdf", "content_type": "application/pdf", "size": 13}]
+    r = client.get(f"/api/messages/{inv['id']}/attachments/0")
+    assert r.status_code == 200 and r.content == b"%PDF-1.4 fake"
+    assert r.headers["content-type"] == "application/octet-stream"
+    assert r.headers["content-disposition"].startswith("attachment;")
+
+    # Folders: the trash and drafts are never offered.
+    folders = client.get(f"/api/accounts/{account_id}/folders").json()
+    assert "Junk" in folders["folders"] and "Trash" not in folders["folders"] and "Drafts" not in folders["folders"]
+
+    # Archive (the server has none yet: Beseder creates "Archive"), then undo.
+    r = client.post(f"/api/messages/{inv['id']}/move", json={"folder": None}).json()
+    assert r["folder"] == "Archive" and r["message_id"] == "<qa-att@example.com>"
+    s.select_folder("INBOX", readonly=True)
+    assert len(s.search("ALL")) == 1
+    s.select_folder("Archive", readonly=True)
+    assert len(s.search("ALL")) == 1
+    assert client.post(f"/api/accounts/{account_id}/restore",
+                       json={"folder": "Archive", "message_id": r["message_id"]}).status_code == 200
+    s.select_folder("INBOX", readonly=True)
+    assert len(s.search("ALL")) == 2
+
+    # Moving to the trash is refused; to Junk it works.
+    other = rows["<qa-1@example.com>"]
+    assert client.post(f"/api/messages/{other['id']}/move", json={"folder": "Trash"}).status_code == 400
+    assert client.post(f"/api/messages/{other['id']}/move", json={"folder": "Junk"}).json()["folder"] == "Junk"
+    s.logout()
+
+
+def test_idle_announces_new_mail(env):
+    import threading
+    import time
+
+    core, _client, account_id, user = env
+    arrived, stop = threading.Event(), threading.Event()
+    t = threading.Thread(target=core.mail.watch_inbox, args=(account_id, arrived.set, stop), daemon=True)
+    t.start()
+    time.sleep(2)  # let it enter IDLE
+    s = server(user)
+    started = time.monotonic()
+    s.append("INBOX", mail(77))
+    assert arrived.wait(15), "IDLE did not report the new message"
+    print(f"IDLE reported new mail after {time.monotonic() - started:.1f}s")
+    stop.set()
+    s.logout()

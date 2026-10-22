@@ -40,6 +40,10 @@ const ICONS = {
   folder: [["path", "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"]],
   help: [["circle", 12, 12, 10], ["path", "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"], ["path", "M12 17h.01"]],
   at: [["circle", 12, 12, 4], ["path", "M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"]],
+  archive: [["rect", 2, 3, 20, 5, 1], ["path", "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"], ["path", "M10 12h4"]],
+  folderMove: [["path", "M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1"],
+    ["path", "M2 13h10"], ["path", "m9 16 3-3-3-3"]],
+  paperclip: [["path", "m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"]],
 };
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -99,12 +103,67 @@ async function api(path, opts = {}) {
 }
 
 let toastTimer;
-function toast(msg) {
+// action = { label, run }: adds a button (e.g. Undo) and keeps the toast a bit longer.
+function toast(msg, action) {
   const t = $("toast");
-  t.textContent = msg;
+  t.replaceChildren();
+  put(t, h("span", {}, msg), action ? h("button", { class: "toast-action", onclick: () => {
+    t.hidden = true;
+    action.run();
+  } }, action.label) : null);
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 3800);
+  toastTimer = setTimeout(() => (t.hidden = true), action ? 7000 : 3800);
+}
+
+function fmtSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// --- push notifications --------------------------------------------------------
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent);
+const isInstalled = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+
+function pushHint() {
+  if (pushSupported()) return null;
+  if (isIOS() && !isInstalled()) return "On iPhone, notifications work once Beseder is on your Home Screen: in Safari, tap Share › Add to Home Screen, then open it from there.";
+  return "This browser doesn't support notifications.";
+}
+
+async function currentPushSubscription() {
+  if (!pushSupported()) return null;
+  const reg = await navigator.serviceWorker.getRegistration();
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+
+async function enablePush() {
+  const hint = pushHint();
+  if (hint) throw new Error(hint);
+  if (await Notification.requestPermission() !== "granted") {
+    throw new Error("Notifications are blocked for Beseder. Allow them in your browser or iPhone settings, then try again.");
+  }
+  const reg = await navigator.serviceWorker.ready;
+  const { public_key } = await api("/api/push");
+  const key = Uint8Array.from(atob(public_key.replace(/-/g, "+").replace(/_/g, "/") + "==".slice(0, (4 - public_key.length % 4) % 4)), (c) => c.charCodeAt(0));
+  let sub = await reg.pushManager.getSubscription();
+  if (sub) {
+    // A subscription made for another server key (e.g. after a reinstall) must be renewed.
+    const old = sub.options?.applicationServerKey ? new Uint8Array(sub.options.applicationServerKey) : null;
+    if (old && old.join() !== key.join()) { await sub.unsubscribe(); sub = null; }
+  }
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  const label = isIOS() ? "iPhone" : /Android/.test(navigator.userAgent) ? "Android" : "Computer";
+  return api("/api/push/subscribe", { method: "POST", body: { subscription: sub.toJSON(), label } });
+}
+
+async function disablePush() {
+  const sub = await currentPushSubscription();
+  if (!sub) return;
+  await api("/api/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } });
+  await sub.unsubscribe();
 }
 
 function busy(btn, label) {
@@ -485,6 +544,27 @@ async function renderMessage(col, id) {
     } }, icon("tag"));
 
   const composer = buildComposer(m);
+  const movePicker = h("div", { class: "move-picker", hidden: true });
+  const archiveBtn = h("button", { class: "round sm", title: "Archive (out of the inbox, not deleted)", "aria-label": "Archive",
+    onclick: () => moveMessage(m, null, archiveBtn) }, icon("archive"));
+  const moveBtn = h("button", { class: "round sm", title: "Move to a folder", "aria-label": "Move to a folder",
+    onclick: async () => {
+      if (!movePicker.hidden) { movePicker.hidden = true; return; }
+      movePicker.hidden = false;
+      movePicker.replaceChildren(h("span", { class: "small muted" }, "Loading folders…"));
+      try {
+        const f = await api(`/api/accounts/${m.account_id}/folders`);
+        const sel = h("select", { "aria-label": "Folder" }, h("option", { value: "" }, "Move to…"),
+          f.folders.map((name) => h("option", { value: name }, name)));
+        sel.addEventListener("change", () => { if (sel.value) moveMessage(m, sel.value, moveBtn); });
+        movePicker.replaceChildren(h("label", { class: "select-pill" }, icon("folderMove"), sel));
+        sel.focus();
+      } catch (e) { movePicker.replaceChildren(h("span", { class: "error" }, e.message)); }
+    } }, icon("folderMove"));
+  const files = (m.attachments || []).length ? h("div", { class: "attachments" }, m.attachments.map((a) =>
+    h("a", { class: "attachment", href: `/api/messages/${m.id}/attachments/${a.idx}`, download: a.filename, title: a.filename },
+      h("span", { class: "ico" }, icon("paperclip")),
+      h("span", { class: "grow" }, h("span", { class: "t" }, a.filename), h("span", { class: "s" }, fmtSize(a.size)))))) : null;
   const replyBtn = h("button", { class: "pill", onclick: () => composer.draft() }, icon("reply"), "Reply with AI");
 
   col.replaceChildren(h("div", { class: "card reader" },
@@ -497,10 +577,36 @@ async function renderMessage(col, id) {
       h("h2", {}, m.from_name || m.from_addr),
       h("div", { class: "sub" }, m.from_name ? `${m.from_addr} · ` : "", `to ${m.account_name}`),
       h("div", { class: "subject" }, m.subject || "(no subject)")),
-    h("div", { class: "actions-row" }, replyBtn, ruleBtn, imgBtn, textBtn),
+    h("div", { class: "actions-row" }, replyBtn, archiveBtn, moveBtn, ruleBtn, imgBtn, textBtn),
+    movePicker,
     bodyBox,
+    files,
     composer.el));
   markSelected();
+}
+
+// Archive (folder = null) or move to a folder. The card disappears, the next email opens,
+// and the toast offers to undo.
+async function moveMessage(m, folder, btn) {
+  const done = busy(btn);
+  let r;
+  try {
+    r = await api(`/api/messages/${m.id}/move`, { method: "POST", body: { folder } });
+  } catch (e) { toast(e.message); done(); return; }
+  done();
+  const card = document.querySelector(`.mail-card[data-id="${m.id}"]`);
+  const next = card?.nextElementSibling?.dataset?.id || card?.previousElementSibling?.dataset?.id;
+  card?.remove();
+  const undo = r.message_id ? { label: "Undo", run: async () => {
+    try {
+      await api(`/api/accounts/${r.account_id}/restore`, { method: "POST", body: { folder: r.folder, message_id: r.message_id } });
+      toast("Back in your inbox");
+      setTimeout(() => { $("list-col").dataset.ready = ""; route(); }, 2500);
+    } catch (e) { toast(e.message); }
+  } } : null;
+  toast(folder ? `Moved to ${r.folder}` : "Archived", undo);
+  refreshStatus().then(() => { renderChrome(); renderSide(); });
+  go(!isPhone() && next ? `#/m/${next}` : "#/");
 }
 
 function emailFrame(html, allowImages) {
@@ -663,7 +769,7 @@ async function renderSettings() {
     ]);
   } catch (e) { toast(e.message); return; }
   col.replaceChildren(h("div", { class: "settings-grid" },
-    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, accountsCard(accounts, outlook), profileCard(ai), setupCard()),
+    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, accountsCard(accounts, outlook), notificationsCard(), profileCard(ai), setupCard()),
     h("div", { style: "display:flex;flex-direction:column;gap:18px" }, aiCard(ai), rulesCard(rules), safetyCard())));
 }
 
@@ -1018,6 +1124,21 @@ function stepAI({ ai, st }) {
   ];
 }
 
+function pushRow() {
+  const hint = pushHint();
+  const btn = h("button", { class: "pill sm" }, "Turn on");
+  const row = h("div", { class: "big-switch", style: "margin-top:10px" },
+    h("div", { class: "grow" }, h("div", { class: "t" }, "Notifications"),
+      h("div", { class: "s" }, hint || "Get a notification when an important email arrives.")),
+    hint ? null : btn);
+  btn.addEventListener("click", async () => {
+    const done = busy(btn, "…");
+    try { await enablePush(); btn.replaceWith(h("span", { class: "tag dark" }, "✓ On")); }
+    catch (e) { toast(e.message); done(); }
+  });
+  return row;
+}
+
 function stepFinish({ accounts, st }) {
   const triage = h("input", { type: "checkbox", checked: st.ai_configured, disabled: !st.ai_configured });
   const check = (ok, text) => h("div", { class: "row-item" }, h("span", { class: "ico" + (ok ? " ok" : "") }, ok ? "✓" : "–"), h("div", { class: "grow t" }, text));
@@ -1031,6 +1152,7 @@ function stepFinish({ accounts, st }) {
       check(!!st.my_name, st.my_name ? `Hi ${st.my_name.split(" ")[0]}!` : "No name set"),
       check(accounts.length > 0, accounts.length ? `${accounts.length} mailbox${accounts.length > 1 ? "es" : ""} connected` : "No mailbox yet (add one in Settings)"),
       check(st.ai_configured, st.ai_configured ? `AI connected: ${wiz.aiLabel || st.ai_label}` : "No AI yet (add one in Settings)")),
+    pushRow(),
     h("div", { class: "notice" }, "On iPhone: in Safari, tap Share › Add to Home Screen to use Beseder like an app."),
     wizNav({ back: () => wizGo(2), nextLabel: "Open my inbox", next: async () => {
       if (st.ai_configured) await api("/api/settings/triage", { method: "PUT", body: { auto: triage.checked } });
@@ -1040,6 +1162,55 @@ function stepFinish({ accounts, st }) {
       go("#/");
     } }),
   ];
+}
+
+function notificationsCard() {
+  const card = h("div", { class: "card" }, h("h2", {}, "Notifications"), h("p", { class: "muted small" }, "Loading…"));
+  (async () => {
+    let info, sub;
+    try { [info, sub] = await Promise.all([api("/api/push"), currentPushSubscription()]); }
+    catch (e) { card.replaceChildren(h("h2", {}, "Notifications"), h("div", { class: "error" }, e.message)); return; }
+    const mode = h("select", {},
+      h("option", { value: "important" }, "Important emails only"),
+      h("option", { value: "all" }, "Every new email"),
+      h("option", { value: "off" }, "Off"));
+    mode.value = info.mode;
+    const preview = h("input", { type: "checkbox", checked: info.preview });
+    const save = async () => {
+      try { await api("/api/push/settings", { method: "PUT", body: { mode: mode.value, preview: preview.checked } }); toast("Saved"); }
+      catch (e) { toast(e.message); }
+    };
+    mode.addEventListener("change", save);
+    preview.addEventListener("change", save);
+    const on = !!sub && Notification.permission === "granted";
+    const hint = pushHint();
+    const toggle = h("button", { class: "pill sm" + (on ? "" : " dark") }, on ? "Turn off on this device" : "Turn on for this device");
+    toggle.addEventListener("click", async () => {
+      const done = busy(toggle, on ? "Turning off…" : "Turning on…");
+      try {
+        if (on) { await disablePush(); toast("Notifications off on this device"); }
+        else { await enablePush(); toast("Notifications on for this device"); }
+        renderSettings();
+      } catch (e) { toast(e.message); done(); }
+    });
+    const test = h("button", { class: "pill sm" }, "Send a test");
+    test.addEventListener("click", async () => {
+      const done = busy(test, "Sending…");
+      try { await api("/api/push/test", { method: "POST" }); toast("Test sent: it should appear in a few seconds"); }
+      catch (e) { toast(e.message); }
+      finally { done(); }
+    });
+    card.replaceChildren();
+    put(card,
+      h("h2", {}, "Notifications"),
+      h("p", { class: "muted small", style: "margin:0" },
+        on ? "On for this device." : "Off for this device.", ` ${info.devices} device${info.devices === 1 ? "" : "s"} in total.`),
+      hint ? h("div", { class: "notice" }, hint) : null,
+      field("Notify me about", mode, mode.value === "important" ? "Needs auto-triage, so the AI can tell what's important." : null),
+      h("label", { class: "row-check small" }, preview, "Show the sender and subject (turn off for privacy on the lock screen)"),
+      h("div", { class: "btns" }, hint ? null : toggle, info.devices ? test : null));
+  })();
+  return card;
 }
 
 function setupCard() {
@@ -1182,13 +1353,14 @@ $("search").addEventListener("input", (e) => {
 $("account-filter").addEventListener("change", (e) => { state.accountId = e.target.value; navigateList(); });
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+// New mail arrives within seconds (IMAP IDLE): poll the cheap status and refresh when it changed.
 setInterval(async () => {
-  if (document.visibilityState !== "visible" || state.view === "settings") return;
-  const wasSyncing = state.status?.syncing;
+  if (document.visibilityState !== "visible" || ["settings", "welcome"].includes(state.view)) return;
+  const before = state.status?.version;
   await refreshStatus();
-  if (wasSyncing && !state.status?.syncing) {
+  if (before !== undefined && state.status && state.status.version !== before) {
     $("list-col").dataset.ready = "";
     renderChrome(); renderSide(); renderList();
   }
-}, 15000);
+}, 10000);
 route();
