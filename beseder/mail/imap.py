@@ -12,7 +12,7 @@ from email.utils import formatdate, make_msgid
 
 from imapclient import IMAPClient
 from imapclient.imapclient import DRAFTS
-from imapclient.exceptions import IMAPClientError
+from imapclient.exceptions import IMAPClientError, LoginError
 
 from ..config import Config
 from ..crypto import Vault
@@ -22,11 +22,21 @@ from .parse import parse_message
 
 log = logging.getLogger(__name__)
 
-PRESETS = {
-    "gmail": {"host": "imap.gmail.com", "port": 993},
-    "icloud": {"host": "imap.mail.me.com", "port": 993},
-    "outlook": {"host": "outlook.office365.com", "port": 993},
-}
+STARTTLS_PORT = 143
+
+
+def open_imap(host: str, port: int, timeout: int = 60) -> IMAPClient:
+    """Encrypted connection: SSL from the start (993), or STARTTLS on 143. Never in clear text."""
+    if port == STARTTLS_PORT:
+        client = IMAPClient(host, port=port, ssl=False, timeout=timeout)
+        client.starttls()
+        return client
+    return IMAPClient(host, port=port, ssl=True, timeout=timeout)
+
+
+class LoginRejected(Exception):
+    pass
+
 
 FETCH_CHUNK = 25
 FLAG_REFRESH_LIMIT = 1000
@@ -52,7 +62,7 @@ class MailService:
 
     def connect(self, account) -> IMAPClient:
         secret = self.vault.decrypt(account["secret"])
-        client = IMAPClient(account["host"], port=account["port"], ssl=True, timeout=60)
+        client = open_imap(account["host"], account["port"])
         try:
             if account["kind"] == "outlook":
                 token = self.oauth.access_token(account["id"], secret, self._save_secret(account["id"]))
@@ -68,10 +78,17 @@ class MailService:
         return client
 
     @staticmethod
-    def test_login(host: str, port: int, username: str, password: str) -> None:
-        with IMAPClient(host, port=port, ssl=True, timeout=15) as client:
-            client.login(username, password)
-            client.select_folder("INBOX", readonly=True)
+    def test_login(host: str, port: int, usernames: list[str], password: str) -> str:
+        """Logs in with the first username that works and returns it."""
+        for username in usernames:
+            with open_imap(host, port, timeout=15) as client:
+                try:
+                    client.login(username, password)
+                except LoginError:
+                    continue
+                client.select_folder("INBOX", readonly=True)
+                return username
+        raise LoginRejected()
 
     def get_account(self, account_id: int):
         with self.db.conn() as c:

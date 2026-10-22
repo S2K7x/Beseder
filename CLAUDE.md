@@ -1,6 +1,6 @@
 # Beseder: project rules
 
-A personal mail client (PWA) that brings Gmail, Outlook and iCloud together, with an AI
+A personal mail client (PWA) that brings Gmail, Outlook, iCloud, Yahoo and other IMAP mailboxes together, with an AI
 that sorts, briefs and drafts replies **on demand**. Runs on a Raspberry Pi behind
 Tailscale. Python backend (FastAPI), vanilla JS front end with no build step.
 Everything (UI, API messages, prompts, docs, comments) is in English.
@@ -35,6 +35,8 @@ Everything (UI, API messages, prompts, docs, comments) is in English.
 ## Layout
 
 - `beseder/mail/`: IMAP connection, sync, parsing, Microsoft OAuth
+- `beseder/mail/providers.py`: every supported mail provider (server, steps shown to the user).
+  Adding a provider = one entry there + a section in `docs/mailboxes.md`.
 - `beseder/ai/`: pluggable AI providers + tasks (triage, brief, draft)
 - `beseder/main.py`: API routes
 - `web/`: the PWA (three columns on desktop, bottom tab bar on phones)

@@ -39,6 +39,9 @@ class MicrosoftOAuth:
     def start(self, client_id: str, tenant: str, email: str, name: str) -> dict:
         r = self.http.post(f"{_base(tenant)}/devicecode", data={"client_id": client_id, "scope": SCOPE})
         data = r.json()
+        if r.status_code != 200 and "AADSTS9002331" in data.get("error_description", "") and tenant != "consumers":
+            # The app was registered for personal Microsoft accounts only: Microsoft requires /consumers.
+            return self.start(client_id, "consumers", email, name)
         if r.status_code != 200:
             raise ValueError(data.get("error_description") or data.get("error") or "Microsoft error")
         flow_id = uuid.uuid4().hex

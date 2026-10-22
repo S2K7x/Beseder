@@ -150,4 +150,4 @@ def test_wrong_password_is_rejected(env):
     host, port = TARGET.split(":")
     r = client.post("/api/accounts", json={"kind": "imap", "email": "x@example.com", "password": "nope",
                                            "host": host, "port": int(port)})
-    assert r.status_code == 400 and "app password" in r.json()["detail"]
+    assert r.status_code == 400 and "Login rejected" in r.json()["detail"]

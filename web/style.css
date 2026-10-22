@@ -325,6 +325,8 @@ body[data-view="welcome"] .settings-col { display: block; }
 .advanced { margin-top: 10px; color: var(--muted); font-size: 14px; }
 .advanced summary { cursor: pointer; }
 .connected { margin-bottom: 6px; }
+.more-providers { margin: -6px 0 14px; }
+.more-providers.on select { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
 .big-switch { display: flex; align-items: center; gap: 16px; padding: 18px; border-radius: var(--r-tile); background: var(--soft); cursor: pointer; }
 .big-switch .t { font-weight: 600; }
 .big-switch .s { color: var(--muted); font-size: 13.5px; }

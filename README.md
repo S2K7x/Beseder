@@ -1,8 +1,8 @@
 # Beseder
 
 **All your mailboxes in one calm inbox, with your own AI assistant.**
-Gmail, Outlook and iCloud together, on your phone and your computer, running on your own
-Raspberry Pi.
+Gmail, Outlook, iCloud, Yahoo and many more together, on your phone and your computer,
+running on your own Raspberry Pi.
 
 ![Beseder on desktop](docs/images/desktop.png)
 
@@ -34,7 +34,7 @@ more command with Tailscale.
 | I want to… | Read |
 |---|---|
 | Install Beseder on a Raspberry Pi, step by step | [docs/install.md](docs/install.md) |
-| Connect Gmail, iCloud, Outlook or another mailbox | [docs/mailboxes.md](docs/mailboxes.md) |
+| Connect Gmail, Outlook, iCloud, Yahoo, Orange, Free… | [docs/mailboxes.md](docs/mailboxes.md) |
 | Choose and connect an AI | [docs/ai.md](docs/ai.md) |
 | Understand how Beseder keeps my mail safe | [docs/security.md](docs/security.md) |
 | Fix a problem | [docs/troubleshooting.md](docs/troubleshooting.md) |

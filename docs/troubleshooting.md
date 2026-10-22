@@ -30,10 +30,14 @@ then run `docker compose up -d`.
 
 | Message | What to do |
 |---|---|
-| *Login rejected. Use an app password.* | You used your normal password, or mistyped the app password. Create a new one ([guide](mailboxes.md)). |
-| *Cannot reach … (timed out)* | Wrong server name or port, or the Pi has no internet. Gmail, iCloud and Outlook servers are filled in for you. |
+| *Login rejected by …* | Most providers need an **app password**, not your usual one ([guide](mailboxes.md)). Orange needs its separate mail app password. |
+| Gmail worked, then *Login rejected* | Changing your Google password revokes app passwords. Create a new one. |
+| GMX, Zoho, Yandex, Orange: *Login rejected* | IMAP access must be turned on in the provider's settings first ([guide](mailboxes.md)). |
+| *Cannot reach … (timed out)* | Wrong server name or port, or the Pi has no internet. Known providers are filled in for you; check **Advanced server settings** if you changed them. |
 | *Microsoft session expired, reconnect the account* | Remove the Outlook mailbox in Settings and add it again. |
-| Outlook: *AADSTS…* errors | Check the Azure steps, especially **Allow public client flows = Yes** and the account type. |
+| Outlook: *AADSTS7000218* or "client_secret" | In Azure › Authentication, set **Allow public client flows** to **Yes**. |
+| Outlook: *AADSTS700016* (app not found) | The client ID is wrong, or the app isn't set to accept personal Microsoft accounts. |
+| Azure: "creating applications outside of a directory has been deprecated" | You need a directory first: create a free Azure account ([guide](mailboxes.md#outlook)). |
 
 A mailbox with a problem shows the error in red in the **Mailboxes** card.
 

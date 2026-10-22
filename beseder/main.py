@@ -8,15 +8,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from imapclient.exceptions import IMAPClientError, LoginError
+from imapclient.exceptions import IMAPClientError
 from pydantic import BaseModel
 
 from .ai import tasks
 from .ai.providers import AIError, make_provider, presets_for
 from .config import Config
 from .db import now_iso
-from .mail.imap import PRESETS as MAIL_PRESETS
-from .mail.imap import MailService, reply_recipient
+from .mail import providers
+from .mail.imap import LoginRejected, MailService, reply_recipient
 from .mail.oauth_ms import MicrosoftOAuth
 from .mail.parse import sanitize_html
 from .service import Beseder
@@ -37,7 +37,7 @@ class AccountIn(BaseModel):
     email: str
     password: str
     host: str = ""
-    port: int = 993
+    port: int = 0
     username: str = ""
 
 
@@ -409,24 +409,36 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
 
     @app.post("/api/accounts")
     async def add_account(body: AccountIn):
-        if body.kind not in ("gmail", "icloud", "imap"):
+        preset = providers.PROVIDERS.get(body.kind)
+        if preset is None or preset.get("auth") == "oauth":
             raise HTTPException(400, "Unknown account type (Outlook uses the Microsoft sign-in)")
-        preset = MAIL_PRESETS.get(body.kind, {})
-        host = preset.get("host") or body.host.strip()
-        port = preset.get("port") or body.port
-        username = body.username.strip() or body.email.strip()
-        password = body.password.replace(" ", "") if body.kind == "gmail" else body.password
+        email = body.email.strip()
+        if "@" not in email:
+            raise HTTPException(400, "Enter the full email address")
+        # Server settings can be overridden (regional servers, self-hosted mail...).
+        host = body.host.strip() or providers.host_for(body.kind, email)
+        port = body.port or preset["port"]
+        password = body.password.replace(" ", "") if preset.get("strip_spaces") else body.password.strip()
         if not host:
             raise HTTPException(400, "IMAP server required")
+        if not password:
+            raise HTTPException(400, f"Enter the {preset['password_label'].lower()}")
         try:
-            await asyncio.to_thread(MailService.test_login, host, port, username, password)
-        except LoginError:
-            raise HTTPException(400, "Login rejected. Use an app password.")
+            username = await asyncio.to_thread(
+                MailService.test_login, host, port, providers.usernames_for(body.kind, email, body.username.strip()),
+                password)
+        except LoginRejected:
+            raise HTTPException(400, f"Login rejected by {preset['label']}. Check the address and use the "
+                                     f"{preset['password_label'].lower()} from the steps above.")
         except (IMAPClientError, OSError) as e:
             raise HTTPException(400, f"Cannot reach {host}:{port} ({e}). Check the address and the server name.")
-        account_id = insert_account(body.kind, body.name, body.email.strip(), host, port, username, {"password": password})
+        account_id = insert_account(body.kind, body.name, email, host, port, username, {"password": password})
         spawn(core.sync_all())
         return {"id": account_id}
+
+    @app.get("/api/mail/providers")
+    def mail_providers():
+        return providers.public_list()
 
     @app.post("/api/accounts/outlook/start")
     def outlook_start(body: OutlookStartIn):
@@ -444,7 +456,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         if state == "error":
             return {"status": "error", "message": data["message"]}
         secret = {"client_id": flow.client_id, "tenant": flow.tenant, "refresh_token": data["refresh_token"]}
-        p = MAIL_PRESETS["outlook"]
+        p = providers.PROVIDERS["outlook"]
         account_id = insert_account("outlook", flow.name, flow.email, p["host"], p["port"], flow.email, secret)
         spawn(core.sync_all())
         return {"status": "done", "id": account_id}

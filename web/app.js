@@ -154,7 +154,7 @@ function avatarStyle(key) {
 }
 function avatar(name, email, size = "", kind = null) {
   const el = h("div", { class: `avatar ${size}`, "aria-hidden": "true", style: avatarStyle(email || name) }, initials(name, email));
-  if (kind) el.append(h("span", { class: "kind", title: KIND_LABELS[kind] || kind }, KIND_LETTERS[kind] || "@"));
+  if (kind) el.append(h("span", { class: "kind", title: providerOf(kind).label }, providerOf(kind).mark));
   return el;
 }
 function splitName(name, email) {
@@ -173,12 +173,12 @@ const CATS = {
   other: { label: "Other", icon: "folder" },
   untriaged: { label: "Untriaged", icon: "help" },
 };
-const KIND_LETTERS = { gmail: "G", icloud: "i", outlook: "O", imap: "@" };
-const KIND_LABELS = { gmail: "Gmail", icloud: "iCloud", outlook: "Outlook", imap: "IMAP" };
+const providerOf = (kind) => (state.providers || []).find((p) => p.key === kind) || { label: kind, mark: "@" };
 
 const state = {
   status: null,
   summary: null,
+  providers: null,
   category: "",
   unread: false,
   accountId: "",
@@ -219,8 +219,10 @@ async function route() {
 
 async function refreshStatus() {
   try {
-    const [st, sum] = await Promise.all([api("/api/status"), state.summary ? null : api("/api/summary/last")]);
+    const [st, sum, prov] = await Promise.all([api("/api/status"), state.summary ? null : api("/api/summary/last"),
+      state.providers ? null : api("/api/mail/providers")]);
     state.status = st;
+    if (prov) state.providers = prov;
     if (sum) state.summary = sum;
     $("sync-state").textContent = st.syncing ? "Syncing…" : "";
   } catch (e) { toast(e.message); }
@@ -645,7 +647,7 @@ function mailboxesWidget() {
     } },
       avatar(a.name, a.email, "sm"),
       h("div", { class: "grow" },
-        h("div", { class: "t" }, a.name, h("span", { class: "muted", style: "font-weight:400" }, ` · ${KIND_LABELS[a.kind] || a.kind}`)),
+        h("div", { class: "t" }, a.name, h("span", { class: "muted", style: "font-weight:400" }, ` · ${providerOf(a.kind).label}`)),
         a.last_error ? h("div", { class: "s error" }, a.last_error) : h("div", { class: "s" }, `${a.email} · ${fmtAgo(a.last_sync)}`)),
       a.unread ? h("span", { class: "tag" + (state.accountId === String(a.id) ? " dark" : "") }, a.unread) : null))
       : h("p", { class: "muted small" }, "No mailbox yet."));
@@ -672,24 +674,6 @@ function field(label, input, hint) {
 // --- guided setup (shared by the welcome assistant and Settings) ----------------------
 const DOCS = "https://github.com/S2K7x/Beseder/blob/HEAD/docs";
 
-const MAIL_GUIDES = {
-  gmail: { label: "Gmail", letter: "G", pwdLabel: "App password", placeholder: "abcd efgh ijkl mnop", steps: [
-    { t: "Turn on 2-Step Verification on your Google account.", url: "https://myaccount.google.com/signinoptions/twosv", label: "Open Google security" },
-    { t: "Create an app password named “Beseder”.", url: "https://myaccount.google.com/apppasswords", label: "Open App passwords" },
-    { t: "Copy the 16-letter password and paste it below. Spaces don't matter." }] },
-  icloud: { label: "iCloud", letter: "i", pwdLabel: "App-specific password", placeholder: "abcd-efgh-ijkl-mnop", steps: [
-    { t: "Sign in to your Apple Account.", url: "https://account.apple.com", label: "Open Apple Account" },
-    { t: "Go to Sign-In and Security › App-Specific Passwords, tap +, name it “Beseder”." },
-    { t: "Paste the password below with your @icloud.com address." }] },
-  outlook: { label: "Outlook", letter: "O", steps: [
-    { t: "Once only: register a free app on Microsoft Azure (about 5 minutes).", url: `${DOCS}/mailboxes.md#outlook`, label: "Follow the guide" },
-    { t: "Paste its Application (client) ID below." },
-    { t: "Tap Sign in with Microsoft and type the code it shows on microsoft.com/devicelogin." }] },
-  imap: { label: "Other", letter: "@", pwdLabel: "Password", steps: [
-    { t: "Find your provider's IMAP server. It often looks like imap.yourprovider.com, port 993." },
-    { t: "If your provider offers app passwords, use one instead of your main password." }] },
-};
-
 function guide(steps) {
   return h("ol", { class: "guide" }, steps.filter(Boolean).map((s) => h("li", {},
     h("div", {}, s.t),
@@ -704,20 +688,52 @@ function choice(on, onclick, mark, title, sub, badge) {
     badge ? h("span", { class: "tag" + (badge === "Free" ? " dark" : "") }, badge) : null);
 }
 
-// Pick a provider, follow 2-3 numbered steps, connect. Calls onAdded() once the mailbox works.
+function providerHost(p, email) {
+  const domain = (email.split("@")[1] || "").toLowerCase();
+  return (p.domain_hosts || {})[domain] || p.host;
+}
+
+// Pick a provider (or just type the address: it is detected), follow the numbered steps,
+// connect. Calls onAdded() once the mailbox works.
 function mailboxSetup(outlook, onAdded) {
+  const list = state.providers;
+  const byKey = Object.fromEntries(list.map((p) => [p.key, p]));
+  const popular = list.filter((p) => p.popular);
   let kind = "gmail";
-  const picker = h("div", { class: "choice-grid four" });
+  let email = "";
+  let name = "";
+  const picker = h("div");
   const form = h("div");
-  const renderPicker = () => picker.replaceChildren(...Object.entries(MAIL_GUIDES).map(([k, g]) =>
-    choice(k === kind, () => { kind = k; renderPicker(); renderForm(); }, g.letter, g.label)));
+
+  function renderPicker() {
+    const more = h("select", { "aria-label": "More providers" },
+      h("option", { value: "" }, "More providers…"),
+      list.filter((p) => !p.popular).map((p) => h("option", { value: p.key }, p.label)));
+    if (!byKey[kind].popular) more.value = kind;
+    more.addEventListener("change", () => { if (more.value) select(more.value); });
+    picker.replaceChildren(
+      h("div", { class: "choice-grid four" }, popular.map((p) => choice(p.key === kind, () => select(p.key), p.mark, p.label))),
+      h("label", { class: "field more-providers" + (byKey[kind].popular ? "" : " on") }, more));
+  }
+  function select(k) { kind = k; renderPicker(); renderForm(); }
 
   function renderForm() {
-    const g = MAIL_GUIDES[kind];
-    const email = h("input", { type: "email", autocomplete: "off", placeholder: kind === "icloud" ? "you@icloud.com" : "you@example.com" });
-    const name = h("input", { type: "text", placeholder: "Personal, Work…" });
+    const p = byKey[kind];
+    const emailIn = h("input", { type: "email", autocomplete: "off", value: email, placeholder: p.domains[0] ? `you@${p.domains[0]}` : "you@example.com" });
+    const nameIn = h("input", { type: "text", value: name, placeholder: "Personal, Work…" });
     const err = h("div", { class: "error" });
-    if (kind === "outlook") {
+    let host = null;
+    // Typing an address switches to the matching provider (e.g. @yahoo.fr -> Yahoo).
+    emailIn.addEventListener("input", () => { email = emailIn.value.trim(); });
+    emailIn.addEventListener("change", () => {
+      const domain = (email.split("@")[1] || "").toLowerCase();
+      const match = list.find((x) => x.domains.includes(domain));
+      if (match && match.key !== kind) { select(match.key); toast(`${match.label} detected`); }
+      else if (host) host.value = providerHost(p, email);
+    });
+    nameIn.addEventListener("input", () => { name = nameIn.value; });
+
+    if (p.auth === "oauth") {
       const clientId = h("input", { type: "text", value: outlook.client_id, placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" });
       const btn = h("button", { class: "pill dark sm" }, "Sign in with Microsoft");
       const flowBox = h("div");
@@ -725,42 +741,42 @@ function mailboxSetup(outlook, onAdded) {
         err.textContent = "";
         try {
           const f = await api("/api/accounts/outlook/start", { method: "POST",
-            body: { email: email.value, name: name.value, client_id: clientId.value } });
+            body: { email: emailIn.value, name: nameIn.value, client_id: clientId.value } });
           flowBox.replaceChildren(h("div", { class: "notice" },
             "Open ", h("a", { href: f.verification_uri, target: "_blank", rel: "noopener" }, f.verification_uri),
             " and enter this code:", h("div", { class: "code" }, f.user_code), "Waiting for you to approve…"));
           pollOutlook(f.flow_id, f.interval, flowBox, onAdded);
         } catch (e) { err.textContent = e.message; }
       });
-      form.replaceChildren(guide(g.steps), field("Address", email), field("Name in Beseder", name),
+      form.replaceChildren(guide(p.steps), field("Address", emailIn), field("Name in Beseder", nameIn),
         field("Application (client) ID", clientId), h("div", { class: "btns" }, btn), err, flowBox);
       return;
     }
-    const pwd = h("input", { type: "password", autocomplete: "off", placeholder: g.placeholder || "" });
-    const host = h("input", { type: "text", placeholder: "imap.example.com" });
-    const port = h("input", { type: "number", value: "993" });
+    const pwd = h("input", { type: "password", autocomplete: "off", placeholder: p.placeholder || "" });
+    host = h("input", { type: "text", value: providerHost(p, email), placeholder: "imap.example.com" });
+    const port = h("input", { type: "number", value: String(p.port) });
     const user = h("input", { type: "text", placeholder: "(defaults to the address)" });
+    const server = h("details", { class: "advanced", open: kind === "imap" },
+      h("summary", {}, kind === "imap" ? "Server" : "Advanced server settings"),
+      field("IMAP server", host), field("Port", port, "993 = SSL, 143 = STARTTLS"), field("Username", user));
     const btn = h("button", { class: "pill dark sm" }, "Connect");
     btn.addEventListener("click", async () => {
       err.textContent = "";
       const done = busy(btn, "Checking…");
       try {
         await api("/api/accounts", { method: "POST", body: {
-          kind, email: email.value, name: name.value, password: pwd.value,
-          host: host.value, port: Number(port.value) || 993, username: user.value } });
-        toast(`${email.value} connected, syncing now`);
+          kind, email: emailIn.value, name: nameIn.value, password: pwd.value,
+          host: host.value.trim() === providerHost(p, emailIn.value.trim()) ? "" : host.value,
+          port: Number(port.value) || 0, username: user.value } });
+        toast(`${emailIn.value} connected, syncing now`);
         $("list-col").dataset.ready = "";
+        email = ""; name = "";
         onAdded();
       } catch (e) { err.textContent = e.message; }
       finally { done(); }
     });
-    form.replaceChildren(...[guide(g.steps),
-      field("Address", email), field("Name in Beseder", name),
-      kind === "imap" && field("IMAP server", host),
-      kind === "imap" && field("Port", port),
-      kind === "imap" && field("Username", user),
-      field(g.pwdLabel, pwd),
-      h("div", { class: "btns" }, btn), err].filter(Boolean));
+    form.replaceChildren(guide(p.steps), field("Address", emailIn), field("Name in Beseder", nameIn),
+      field(p.password_label, pwd), server, h("div", { class: "btns" }, btn), err);
   }
   renderPicker();
   renderForm();
@@ -783,7 +799,7 @@ function accountsCard(accounts, outlook) {
   const list = accounts.map((a) => h("div", { class: "row-item" },
     avatar(a.name, a.email, "sm"),
     h("div", { class: "grow" },
-      h("div", { class: "t" }, a.name, h("span", { class: "muted", style: "font-weight:400" }, ` · ${KIND_LABELS[a.kind] || a.kind}`)),
+      h("div", { class: "t" }, a.name, h("span", { class: "muted", style: "font-weight:400" }, ` · ${providerOf(a.kind).label}`)),
       a.last_error ? h("div", { class: "s error" }, a.last_error) : h("div", { class: "s" }, `${a.email} · ${fmtAgo(a.last_sync)}`)),
     h("button", { class: "pill sm", onclick: async () => {
       if (!confirm(`Remove ${a.email} from Beseder? Nothing is deleted in the mailbox itself.`)) return;
