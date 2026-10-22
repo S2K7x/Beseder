@@ -267,6 +267,71 @@ body[data-view="settings"] .side-col { display: none; }
 .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
 .code { font: 600 28px/1.2 ui-monospace, Menlo, monospace; letter-spacing: 4px; margin: 8px 0; color: var(--text); }
 
+/* --- welcome assistant -------------------------------------------------------- */
+body[data-view="welcome"] .rail,
+body[data-view="welcome"] .top,
+body[data-view="welcome"] .tabbar,
+body[data-view="welcome"] .list-col,
+body[data-view="welcome"] .reader-col,
+body[data-view="welcome"] .side-col { display: none !important; }
+body[data-view="welcome"] .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+body[data-view="welcome"] .main { grid-template-columns: minmax(0, 1fr); }
+body[data-view="welcome"] .settings-col { display: block; }
+.wizard { max-width: 720px; margin: 0 auto; padding: 8px 0 32px; }
+.wiz-head { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
+.wiz-head .logo { width: 52px; height: 52px; border-radius: 18px; flex: none; }
+.wiz-steps { display: flex; gap: 6px; flex: 1; }
+.wiz-step { flex: 1; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; background: var(--card);
+  box-shadow: var(--shadow); color: var(--muted); font-size: 13px; min-width: 0; }
+.wiz-step .dot { width: 22px; height: 22px; border-radius: 50%; background: var(--soft); display: grid; place-items: center; font-size: 12px; font-weight: 650; flex: none; }
+.wiz-step .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wiz-step.on { background: var(--ink); color: var(--ink-text); }
+.wiz-step.on .dot { background: var(--ink-text); color: var(--ink); }
+.wiz-step.done .dot { background: var(--ok); color: #fff; }
+.wiz-card { padding: 32px; }
+.wiz-title { font-size: 30px; letter-spacing: -0.02em; margin: 0; line-height: 1.2; }
+.wiz-lead { color: var(--muted); font-size: 16px; margin: 8px 0 20px; }
+.wiz-sub { font-size: 15px; margin: 20px 0 10px; }
+.wiz-nav { display: flex; align-items: center; gap: 14px; margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--line); }
+.wiz-nav .link { display: inline-flex; align-items: center; gap: 4px; }
+.wiz-nav .pill.dark { height: 48px; }
+.features { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
+.feature { display: flex; gap: 12px; padding: 14px; border-radius: var(--r-tile); background: var(--soft); }
+.feature .ico { width: 36px; height: 36px; border-radius: 50%; background: var(--card); display: grid; place-items: center; flex: none; }
+.feature .t { font-weight: 600; font-size: 14.5px; }
+.feature .s { color: var(--muted); font-size: 13px; line-height: 1.4; }
+.choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+.choice-grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.choice { display: flex; align-items: center; gap: 12px; text-align: left; padding: 12px 14px; border-radius: 18px; cursor: pointer;
+  border: 1.5px solid var(--line); background: var(--card); min-width: 0; }
+.choice:hover { border-color: var(--ring); }
+.choice.on { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+.choice .mark { width: 36px; height: 36px; border-radius: 50%; background: var(--soft); display: grid; place-items: center; font-weight: 700; flex: none; }
+.choice.on .mark { background: var(--ink); color: var(--ink-text); }
+.choice .grow { flex: 1; min-width: 0; }
+.choice .t { display: block; font-weight: 600; font-size: 14.5px; }
+.choice .s { display: block; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guide { list-style: none; counter-reset: g; padding: 0; margin: 4px 0 6px; }
+.guide li { counter-increment: g; position: relative; padding: 4px 0 12px 40px; }
+.guide li::before { content: counter(g); position: absolute; left: 0; top: 0; width: 28px; height: 28px; border-radius: 50%;
+  background: var(--ink); color: var(--ink-text); display: grid; place-items: center; font-size: 13px; font-weight: 700; }
+.guide-link { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; font-size: 14px; font-weight: 550; text-decoration: none;
+  padding: 6px 12px; border-radius: 999px; background: var(--soft); }
+.guide-link svg.icon { width: 14px; height: 14px; }
+.cmd { display: block; margin-top: 6px; padding: 8px 12px; border-radius: 12px; background: var(--soft); font: 13px/1.4 ui-monospace, Menlo, monospace;
+  overflow-x: auto; white-space: pre; user-select: all; }
+.success { margin-top: 12px; padding: 12px 14px; border-radius: 14px; background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); font-weight: 550; }
+.row-check { display: flex; align-items: center; gap: 8px; margin: 8px 4px 0; }
+.advanced { margin-top: 10px; color: var(--muted); font-size: 14px; }
+.advanced summary { cursor: pointer; }
+.connected { margin-bottom: 6px; }
+.big-switch { display: flex; align-items: center; gap: 16px; padding: 18px; border-radius: var(--r-tile); background: var(--soft); cursor: pointer; }
+.big-switch .t { font-weight: 600; }
+.big-switch .s { color: var(--muted); font-size: 13.5px; }
+.checklist { margin: 14px 0; }
+.checklist .ico { font-weight: 700; color: var(--muted); }
+.checklist .ico.ok { background: var(--ok); color: #fff; }
+
 #toast {
   position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%);
   background: var(--ink); color: var(--ink-text); padding: 12px 18px; border-radius: 16px;
@@ -322,6 +387,13 @@ body[data-view="settings"] .side-col { display: none; }
   .avatar.lg { width: 92px; height: 92px; font-size: 30px; }
   .card { padding: 18px; }
 
+  .wiz-card { padding: 22px; }
+  .wiz-title { font-size: 24px; }
+  .wiz-step .lbl { display: none; }
+  .wiz-step { justify-content: center; padding: 8px; }
+  .features, .choice-grid, .choice-grid.four { grid-template-columns: minmax(0, 1fr); }
+  .choice-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body[data-view="welcome"] .main { padding-bottom: 24px; }
   .tabbar {
     position: fixed; left: 16px; right: 16px; bottom: calc(12px + env(safe-area-inset-bottom)); z-index: 30;
     display: flex; justify-content: space-around; padding: 8px; border-radius: 999px;

@@ -3,7 +3,7 @@
 import asyncio
 import logging
 
-from .ai.providers import PRESETS, AIConfig, AIError, Provider, make_provider
+from .ai.providers import AIConfig, AIError, Provider, make_provider, presets_for
 from .ai.tasks import CATEGORIES, triage
 from .config import Config
 from .crypto import Vault
@@ -35,13 +35,14 @@ class Beseder:
         return AIConfig(api_key=api_key, **{k: v for k, v in stored.items() if k in AIConfig.__dataclass_fields__})
 
     def save_ai_config(self, data: dict) -> None:
+        presets = presets_for(self.config.in_docker)
         preset = data.get("preset", "")
-        if preset not in PRESETS:
+        if preset not in presets:
             raise ValueError("Unknown provider")
         cfg = {
             "preset": preset,
-            "kind": PRESETS[preset]["kind"],
-            "base_url": (data.get("base_url") or PRESETS[preset]["base_url"]).strip(),
+            "kind": presets[preset]["kind"],
+            "base_url": (data.get("base_url") or presets[preset]["base_url"]).strip(),
             "model": (data.get("model") or "").strip(),
             "model_fast": (data.get("model_fast") or "").strip(),
             "command": (data.get("command") or "claude").strip(),
@@ -62,6 +63,10 @@ class Beseder:
             self._provider = make_provider(cfg)
             self._provider_key = key
         return self._provider
+
+    @property
+    def onboarded(self) -> bool:
+        return bool(self.db.get_setting("onboarded", False))
 
     @property
     def auto_triage(self) -> bool:

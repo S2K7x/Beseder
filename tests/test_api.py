@@ -113,3 +113,22 @@ def test_profile_and_summary_language(client):
     client.put("/api/settings/profile", json={"name": "Sam", "summary_language": "French"})
     got = client.get("/api/settings/ai").json()
     assert got["my_name"] == "Sam" and got["summary_language"] == "French"
+
+
+def test_health_and_onboarding_flag(client):
+    assert client.get("/api/health").json() == {"ok": True}
+    assert client.get("/api/status").json()["onboarded"] is False
+    client.put("/api/settings/onboarded", json={"done": True})
+    assert client.get("/api/status").json()["onboarded"] is True
+
+
+def test_ollama_points_to_host_inside_docker(tmp_path):
+    from beseder.config import Config
+    from beseder.main import create_app
+
+    app = create_app(Config(data_dir=tmp_path, run_scheduler=False, allowed_hosts=["testserver"], in_docker=True))
+    with TestClient(app, headers={"X-Beseder": "1"}) as c:
+        presets = c.get("/api/settings/ai").json()["presets"]
+        assert presets["ollama"]["base_url"] == "http://host.docker.internal:11434/v1"
+        c.put("/api/settings/ai", json={"preset": "ollama", "model": "llama3.2"})
+        assert app.state.core.ai_config().base_url == "http://host.docker.internal:11434/v1"

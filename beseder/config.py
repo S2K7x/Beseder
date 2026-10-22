@@ -26,6 +26,8 @@ class Config:
     max_message_bytes: int = field(
         default_factory=lambda: int(os.environ.get("BESEDER_MAX_MESSAGE_BYTES", str(10 * 1024 * 1024)))
     )
+    # Set by the Docker image. Changes a few defaults (e.g. where Ollama lives).
+    in_docker: bool = field(default_factory=lambda: os.environ.get("BESEDER_IN_DOCKER", "0") == "1")
     run_scheduler: bool = field(default_factory=lambda: os.environ.get("BESEDER_SCHEDULER", "1") == "1")
 
     @property

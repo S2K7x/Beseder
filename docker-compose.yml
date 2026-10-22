@@ -1,0 +1,28 @@
+# Start:   docker compose up -d
+# Update:  git pull && docker compose up -d --build
+# Logs:    docker compose logs -f
+services:
+  beseder:
+    build:
+      context: .
+      args:
+        # true = include the Claude Code CLI (to use your Claude subscription as the AI)
+        WITH_CLAUDE_CLI: "${WITH_CLAUDE_CLI:-false}"
+    image: beseder:latest
+    container_name: beseder
+    restart: unless-stopped
+    ports:
+      # Only reachable from the machine itself. Use `tailscale serve` to reach it from your phone.
+      - "127.0.0.1:${BESEDER_PORT:-8000}:8000"
+    environment:
+      # Addresses the app answers to. Add yours if you don't use Tailscale's *.ts.net name.
+      BESEDER_ALLOWED_HOSTS: "${BESEDER_ALLOWED_HOSTS:-localhost,127.0.0.1,*.ts.net}"
+    volumes:
+      # Your settings, encrypted passwords and synced mail live here.
+      - beseder-data:/data
+    extra_hosts:
+      # Lets the app reach an Ollama running on the same machine.
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  beseder-data:

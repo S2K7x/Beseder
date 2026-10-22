@@ -196,15 +196,18 @@ async function route() {
   const hash = location.hash || "#/";
   const m = hash.match(/^#\/m\/(\d+)$/);
   state.selectedId = m ? Number(m[1]) : null;
-  state.view = m ? "message" : hash === "#/settings" ? "settings" : hash === "#/brief" ? "brief" : "inbox";
+  const views = { "#/settings": "settings", "#/brief": "brief", "#/welcome": "welcome" };
+  state.view = m ? "message" : views[hash] || "inbox";
+  await refreshStatus();
+  // First launch: the setup assistant runs until it is finished (or skipped).
+  if (state.status && !state.status.onboarded && state.view !== "welcome") return go("#/welcome");
   document.body.dataset.view = state.view;
   $("back").hidden = !(isPhone() && state.view === "message");
   if (isPhone()) window.scrollTo(0, 0);
-  await refreshStatus();
   renderChrome();
-  if (state.view === "settings") {
+  if (state.view === "settings" || state.view === "welcome") {
     $("settings-col").hidden = false;
-    return renderSettings();
+    return state.view === "welcome" ? renderWelcome() : renderSettings();
   }
   $("settings-col").hidden = true;
   renderSide();
@@ -658,12 +661,122 @@ async function renderSettings() {
     ]);
   } catch (e) { toast(e.message); return; }
   col.replaceChildren(h("div", { class: "settings-grid" },
-    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, accountsCard(accounts, outlook), profileCard(ai)),
+    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, accountsCard(accounts, outlook), profileCard(ai), setupCard()),
     h("div", { style: "display:flex;flex-direction:column;gap:18px" }, aiCard(ai), rulesCard(rules), safetyCard())));
 }
 
 function field(label, input, hint) {
   return h("label", { class: "field" }, h("span", {}, label), input, hint ? h("div", { class: "hint" }, hint) : null);
+}
+
+// --- guided setup (shared by the welcome assistant and Settings) ----------------------
+const DOCS = "https://github.com/S2K7x/Beseder/blob/HEAD/docs";
+
+const MAIL_GUIDES = {
+  gmail: { label: "Gmail", letter: "G", pwdLabel: "App password", placeholder: "abcd efgh ijkl mnop", steps: [
+    { t: "Turn on 2-Step Verification on your Google account.", url: "https://myaccount.google.com/signinoptions/twosv", label: "Open Google security" },
+    { t: "Create an app password named “Beseder”.", url: "https://myaccount.google.com/apppasswords", label: "Open App passwords" },
+    { t: "Copy the 16-letter password and paste it below. Spaces don't matter." }] },
+  icloud: { label: "iCloud", letter: "i", pwdLabel: "App-specific password", placeholder: "abcd-efgh-ijkl-mnop", steps: [
+    { t: "Sign in to your Apple Account.", url: "https://account.apple.com", label: "Open Apple Account" },
+    { t: "Go to Sign-In and Security › App-Specific Passwords, tap +, name it “Beseder”." },
+    { t: "Paste the password below with your @icloud.com address." }] },
+  outlook: { label: "Outlook", letter: "O", steps: [
+    { t: "Once only: register a free app on Microsoft Azure (about 5 minutes).", url: `${DOCS}/mailboxes.md#outlook`, label: "Follow the guide" },
+    { t: "Paste its Application (client) ID below." },
+    { t: "Tap Sign in with Microsoft and type the code it shows on microsoft.com/devicelogin." }] },
+  imap: { label: "Other", letter: "@", pwdLabel: "Password", steps: [
+    { t: "Find your provider's IMAP server. It often looks like imap.yourprovider.com, port 993." },
+    { t: "If your provider offers app passwords, use one instead of your main password." }] },
+};
+
+function guide(steps) {
+  return h("ol", { class: "guide" }, steps.filter(Boolean).map((s) => h("li", {},
+    h("div", {}, s.t),
+    s.code ? h("code", { class: "cmd" }, s.code) : null,
+    s.url ? h("a", { href: s.url, target: "_blank", rel: "noopener", class: "guide-link" }, s.label || "Open", icon("arrowUpRight")) : null)));
+}
+
+function choice(on, onclick, mark, title, sub, badge) {
+  return h("button", { type: "button", class: "choice" + (on ? " on" : ""), onclick },
+    h("span", { class: "mark" }, mark),
+    h("span", { class: "grow" }, h("span", { class: "t" }, title), sub ? h("span", { class: "s" }, sub) : null),
+    badge ? h("span", { class: "tag" + (badge === "Free" ? " dark" : "") }, badge) : null);
+}
+
+// Pick a provider, follow 2-3 numbered steps, connect. Calls onAdded() once the mailbox works.
+function mailboxSetup(outlook, onAdded) {
+  let kind = "gmail";
+  const picker = h("div", { class: "choice-grid four" });
+  const form = h("div");
+  const renderPicker = () => picker.replaceChildren(...Object.entries(MAIL_GUIDES).map(([k, g]) =>
+    choice(k === kind, () => { kind = k; renderPicker(); renderForm(); }, g.letter, g.label)));
+
+  function renderForm() {
+    const g = MAIL_GUIDES[kind];
+    const email = h("input", { type: "email", autocomplete: "off", placeholder: kind === "icloud" ? "you@icloud.com" : "you@example.com" });
+    const name = h("input", { type: "text", placeholder: "Personal, Work…" });
+    const err = h("div", { class: "error" });
+    if (kind === "outlook") {
+      const clientId = h("input", { type: "text", value: outlook.client_id, placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" });
+      const btn = h("button", { class: "pill dark sm" }, "Sign in with Microsoft");
+      const flowBox = h("div");
+      btn.addEventListener("click", async () => {
+        err.textContent = "";
+        try {
+          const f = await api("/api/accounts/outlook/start", { method: "POST",
+            body: { email: email.value, name: name.value, client_id: clientId.value } });
+          flowBox.replaceChildren(h("div", { class: "notice" },
+            "Open ", h("a", { href: f.verification_uri, target: "_blank", rel: "noopener" }, f.verification_uri),
+            " and enter this code:", h("div", { class: "code" }, f.user_code), "Waiting for you to approve…"));
+          pollOutlook(f.flow_id, f.interval, flowBox, onAdded);
+        } catch (e) { err.textContent = e.message; }
+      });
+      form.replaceChildren(guide(g.steps), field("Address", email), field("Name in Beseder", name),
+        field("Application (client) ID", clientId), h("div", { class: "btns" }, btn), err, flowBox);
+      return;
+    }
+    const pwd = h("input", { type: "password", autocomplete: "off", placeholder: g.placeholder || "" });
+    const host = h("input", { type: "text", placeholder: "imap.example.com" });
+    const port = h("input", { type: "number", value: "993" });
+    const user = h("input", { type: "text", placeholder: "(defaults to the address)" });
+    const btn = h("button", { class: "pill dark sm" }, "Connect");
+    btn.addEventListener("click", async () => {
+      err.textContent = "";
+      const done = busy(btn, "Checking…");
+      try {
+        await api("/api/accounts", { method: "POST", body: {
+          kind, email: email.value, name: name.value, password: pwd.value,
+          host: host.value, port: Number(port.value) || 993, username: user.value } });
+        toast(`${email.value} connected, syncing now`);
+        $("list-col").dataset.ready = "";
+        onAdded();
+      } catch (e) { err.textContent = e.message; }
+      finally { done(); }
+    });
+    form.replaceChildren(...[guide(g.steps),
+      field("Address", email), field("Name in Beseder", name),
+      kind === "imap" && field("IMAP server", host),
+      kind === "imap" && field("Port", port),
+      kind === "imap" && field("Username", user),
+      field(g.pwdLabel, pwd),
+      h("div", { class: "btns" }, btn), err].filter(Boolean));
+  }
+  renderPicker();
+  renderForm();
+  return h("div", {}, picker, form);
+}
+
+async function pollOutlook(flowId, interval, box, onAdded) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, Math.max(interval, 3) * 1000));
+    if (!document.body.contains(box)) return;
+    let r;
+    try { r = await api("/api/accounts/outlook/poll", { method: "POST", body: { flow_id: flowId } }); }
+    catch (e) { box.replaceChildren(h("div", { class: "error" }, e.message)); return; }
+    if (r.status === "done") { toast("Outlook connected, syncing now"); $("list-col").dataset.ready = ""; onAdded(); return; }
+    if (r.status === "error") { box.replaceChildren(h("div", { class: "error" }, r.message)); return; }
+  }
 }
 
 function accountsCard(accounts, outlook) {
@@ -676,92 +789,250 @@ function accountsCard(accounts, outlook) {
       if (!confirm(`Remove ${a.email} from Beseder? Nothing is deleted in the mailbox itself.`)) return;
       try { await api(`/api/accounts/${a.id}`, { method: "DELETE" }); renderSettings(); } catch (e) { toast(e.message); }
     } }, "Remove")));
-
-  const form = h("div");
-  const kind = h("select", {},
-    h("option", { value: "gmail" }, "Gmail"),
-    h("option", { value: "icloud" }, "iCloud"),
-    h("option", { value: "outlook" }, "Outlook / Hotmail"),
-    h("option", { value: "imap" }, "Other (IMAP)"));
-  kind.addEventListener("change", () => renderForm());
-
-  function renderForm() {
-    const k = kind.value;
-    const email = h("input", { type: "email", autocomplete: "off", placeholder: "you@example.com" });
-    const name = h("input", { type: "text", placeholder: "Personal, Work…" });
-    const err = h("div", { class: "error" });
-    if (k === "outlook") {
-      const clientId = h("input", { type: "text", value: outlook.client_id, placeholder: "xxxxxxxx-xxxx-…" });
-      const btn = h("button", { class: "pill dark sm" }, "Sign in with Microsoft");
-      const flowBox = h("div");
-      btn.addEventListener("click", async () => {
-        err.textContent = "";
-        try {
-          const f = await api("/api/accounts/outlook/start", { method: "POST",
-            body: { email: email.value, name: name.value, client_id: clientId.value } });
-          flowBox.replaceChildren(h("div", { class: "notice" },
-            "Open ", h("a", { href: f.verification_uri, target: "_blank", rel: "noopener" }, f.verification_uri),
-            " and enter this code:", h("div", { class: "code" }, f.user_code), "Waiting for you to approve…"));
-          pollOutlook(f.flow_id, f.interval, flowBox);
-        } catch (e) { err.textContent = e.message; }
-      });
-      form.replaceChildren(field("Address", email), field("Display name", name),
-        field("Azure client ID", clientId, "One-time setup: a free app registration on portal.azure.com (see the README)."),
-        h("div", { class: "btns" }, btn), err, flowBox);
-      return;
-    }
-    const pwd = h("input", { type: "password", autocomplete: "off" });
-    const host = h("input", { type: "text", placeholder: "imap.example.com" });
-    const port = h("input", { type: "number", value: "993" });
-    const user = h("input", { type: "text", placeholder: "(defaults to the address)" });
-    const hints = {
-      gmail: ["Create one at myaccount.google.com/apppasswords (2-Step Verification must be on).", "https://myaccount.google.com/apppasswords"],
-      icloud: ["Create one at account.apple.com › Sign-In and Security › App-Specific Passwords.", "https://account.apple.com"],
-      imap: ["Your mailbox password, or an app password if your provider offers them.", null],
-    }[k];
-    const btn = h("button", { class: "pill dark sm" }, "Add mailbox");
-    btn.addEventListener("click", async () => {
-      err.textContent = "";
-      const done = busy(btn, "Testing the connection…");
-      try {
-        await api("/api/accounts", { method: "POST", body: {
-          kind: k, email: email.value, name: name.value, password: pwd.value,
-          host: host.value, port: Number(port.value) || 993, username: user.value } });
-        toast("Mailbox added, syncing now");
-        $("list-col").dataset.ready = "";
-        renderSettings();
-      } catch (e) { err.textContent = e.message; }
-      finally { done(); }
-    });
-    form.replaceChildren(...[
-      field("Address", email), field("Display name", name),
-      k === "imap" && field("IMAP server", host),
-      k === "imap" && field("Port", port),
-      k === "imap" && field("Username", user),
-      field(k === "imap" ? "Password" : "App password", pwd,
-        hints[1] ? h("a", { href: hints[1], target: "_blank", rel: "noopener" }, hints[0]) : hints[0]),
-      h("div", { class: "btns" }, btn), err].filter(Boolean));
-  }
-  renderForm();
-
   return h("div", { class: "card" },
     h("h2", {}, "Mailboxes"),
     accounts.length ? list : h("p", { class: "muted small" }, "No mailbox yet. Add your first one below."),
-    h("h3", { style: "font-size:15px;margin:22px 0 0" }, "Add a mailbox"),
-    field("Provider", kind),
-    form);
+    h("h3", { style: "font-size:15px;margin:22px 0 10px" }, "Add a mailbox"),
+    mailboxSetup(outlook, renderSettings));
 }
 
-async function pollOutlook(flowId, interval, box) {
-  for (;;) {
-    await new Promise((r) => setTimeout(r, Math.max(interval, 3) * 1000));
-    if (!document.body.contains(box)) return;
-    let r;
-    try { r = await api("/api/accounts/outlook/poll", { method: "POST", body: { flow_id: flowId } }); }
-    catch (e) { box.replaceChildren(h("div", { class: "error" }, e.message)); return; }
-    if (r.status === "done") { toast("Outlook mailbox added"); $("list-col").dataset.ready = ""; renderSettings(); return; }
-    if (r.status === "error") { box.replaceChildren(h("div", { class: "error" }, r.message)); return; }
+function aiSteps(key, p, inDocker) {
+  const getKey = { url: p.key_url, label: "Get a key" };
+  return {
+    openrouter: [{ t: "Create a free OpenRouter account, then an API key.", ...getKey },
+      { t: "Paste the key below and tap Load models." },
+      { t: "Keep a model ending in “:free”, then tap Test & save." }],
+    google: [{ t: "Sign in with Google and create an API key.", ...getKey },
+      { t: "Paste it below, tap Load models, then Test & save." }],
+    ollama: [{ t: "Install Ollama and download a model.", code: "ollama pull llama3.2", url: p.key_url, label: "Get Ollama" },
+      inDocker ? { t: "Let Beseder's container reach it: run Ollama with OLLAMA_HOST=0.0.0.0.", url: `${DOCS}/ai.md#ollama`, label: "How to" } : null,
+      { t: "Tap Load models, pick one, then Test & save." }],
+    anthropic: [{ t: "Create an API key in the Anthropic Console.", ...getKey },
+      { t: "Paste it below. Good models are already picked: tap Test & save." }],
+    claude_cli: inDocker
+      ? [{ t: "Rebuild Beseder with Claude Code inside:", code: "WITH_CLAUDE_CLI=true docker compose up -d --build", url: `${DOCS}/ai.md#claude-code`, label: "Details" },
+        { t: "Sign in once (it stays signed in):", code: "docker compose exec -it beseder claude" },
+        { t: "Tap Test & save." }]
+      : [{ t: "Sign in once by running claude in a terminal on this machine." }, { t: "Tap Test & save." }],
+    custom: [{ t: "Enter the API URL and key of any OpenAI-compatible service." },
+      { t: "Load models, pick one, then Test & save." }],
+  }[key];
+}
+
+function recommendModel(key, models, p) {
+  const ok = (m) => !/(embed|image|tts|audio|vision-only|guard|whisper|live)/i.test(m);
+  if (key === "openrouter") return models.find((m) => m.endsWith(":free") && ok(m)) || models[0];
+  if (key === "google") return models.find((m) => /flash/.test(m) && ok(m) && !/preview|exp/.test(m)) || models.find((m) => /flash/.test(m)) || models[0];
+  if (key === "anthropic" && models.includes(p.model)) return p.model;
+  return models.find(ok) || models[0];
+}
+
+// Step-by-step AI connection. Calls onOk(label) after a successful test.
+function aiSetup(key, ai, inDocker, onOk) {
+  const p = ai.presets[key];
+  const same = ai.preset === key;
+  const apiKey = h("input", { type: "password", autocomplete: "off",
+    placeholder: same && ai.has_key ? "•••••• saved (leave empty to keep it)" : "Paste your key" });
+  const baseUrl = h("input", { type: "url", value: same && ai.base_url ? ai.base_url : p.base_url });
+  const command = h("input", { type: "text", value: ai.command || "claude" });
+  const freeOnly = h("input", { type: "checkbox", checked: true });
+  let models = [];
+  const modelSel = h("select");
+  const modelTxt = h("input", { type: "text", placeholder: "model name", value: same ? ai.model : p.model || "" });
+  const modelBox = h("div");
+  const result = h("div");
+  const err = h("div", { class: "error" });
+
+  function renderModels(pick) {
+    const list = key === "openrouter" && freeOnly.checked ? models.filter((m) => m.endsWith(":free")) : models;
+    modelSel.replaceChildren(...list.map((m) => h("option", { value: m }, m)));
+    if (pick && list.includes(pick)) modelSel.value = pick;
+    modelBox.replaceChildren();
+    put(modelBox, field("Model", list.length ? modelSel : modelTxt),
+      key === "openrouter" && models.length ? h("label", { class: "small muted row-check" }, freeOnly, "Free models only") : null);
   }
+  freeOnly.addEventListener("change", () => renderModels(modelSel.value));
+  renderModels();
+
+  const form = () => ({
+    preset: key, base_url: baseUrl.value, api_key: apiKey.value, command: command.value,
+    model: key === "claude_cli" ? "" : (models.length ? modelSel.value : modelTxt.value),
+    model_fast: key === "anthropic" || key === "claude_cli" ? p.model_fast || "" : "",
+  });
+
+  const loadBtn = h("button", { class: "pill sm" }, "Load models");
+  loadBtn.addEventListener("click", async () => {
+    err.textContent = "";
+    const done = busy(loadBtn, "Loading…");
+    try {
+      models = (await api("/api/settings/ai/models", { method: "POST", body: form() })).models;
+      if (!models.length) throw new Error("No model found. Download one first (see step 1).");
+      renderModels(recommendModel(key, models, p));
+      toast(models.length === 1 ? "1 model found and selected" : `${models.length} models found, a good one is selected`);
+    } catch (e) { err.textContent = e.message; }
+    finally { done(); }
+  });
+  const testBtn = h("button", { class: "pill dark sm" }, "Test & save");
+  testBtn.addEventListener("click", async () => {
+    err.textContent = "";
+    result.replaceChildren();
+    const done = busy(testBtn, "Testing…");
+    try {
+      await api("/api/settings/ai", { method: "PUT", body: form() });
+      apiKey.value = "";
+      const r = await api("/api/settings/ai/test", { method: "POST" });
+      result.replaceChildren(h("div", { class: "success" }, "✓ Connected. The AI answered “", r.reply, "”."));
+      onOk(p.label);
+    } catch (e) { err.textContent = e.message; }
+    finally { done(); }
+  });
+
+  const needsKey = p.needs_key || key === "custom";
+  const hasModels = key !== "claude_cli";
+  return h("div", { class: "ai-setup" },
+    guide(aiSteps(key, p, inDocker)),
+    p.note ? h("div", { class: "notice" }, p.note) : null,
+    key === "ollama" || key === "custom" ? field("API URL", baseUrl) : null,
+    needsKey ? field("API key", apiKey) : null,
+    key === "claude_cli" ? h("details", { class: "advanced" }, h("summary", {}, "Advanced"), field("Command", command)) : null,
+    hasModels ? modelBox : null,
+    h("div", { class: "btns" }, hasModels ? loadBtn : null, testBtn),
+    err, result);
+}
+
+// --- welcome assistant -----------------------------------------------------------------
+const wiz = { step: 0, preset: null, aiLabel: "" };
+const LANGS = ["English", "French", "Spanish", "German", "Italian", "Portuguese", "Dutch", "Hebrew", "Arabic"];
+const WIZ_STEPS = ["Welcome", "Mailboxes", "AI", "Finish"];
+
+async function renderWelcome() {
+  let ai, accounts, outlook;
+  try {
+    [ai, accounts, outlook] = await Promise.all([api("/api/settings/ai"), api("/api/accounts"), api("/api/settings/outlook")]);
+    await refreshStatus();
+  } catch (e) { toast(e.message); return; }
+  const ctx = { ai, accounts, outlook, st: state.status };
+  const body = [stepWelcome, stepMailboxes, stepAI, stepFinish][wiz.step](ctx);
+  $("settings-col").replaceChildren(h("div", { class: "wizard" },
+    h("div", { class: "wiz-head" },
+      h("div", { class: "logo" }, icon("logo")),
+      h("div", { class: "wiz-steps" }, WIZ_STEPS.map((s, i) => h("div", { class: "wiz-step" + (i === wiz.step ? " on" : "") + (i < wiz.step ? " done" : "") },
+        h("span", { class: "dot" }, i < wiz.step ? "✓" : String(i + 1)), h("span", { class: "lbl" }, s))))),
+    h("div", { class: "card wiz-card" }, body)));
+  window.scrollTo(0, 0);
+}
+function wizGo(step) { wiz.step = step; renderWelcome(); }
+
+function wizNav({ back, skip, next, nextLabel = "Continue", nextDisabled = false }) {
+  const nextBtn = next ? h("button", { class: "pill dark", disabled: nextDisabled }, nextLabel, icon("arrowUpRight")) : null;
+  if (nextBtn) nextBtn.addEventListener("click", async () => {
+    const done = busy(nextBtn);
+    try { await next(); } catch (e) { toast(e.message); } finally { done(); }
+  });
+  return h("div", { class: "wiz-nav" },
+    back ? h("button", { class: "link", onclick: back }, icon("chevronLeft"), "Back") : h("span"),
+    h("span", { style: "flex:1" }),
+    skip ? h("button", { class: "link", onclick: skip[1] }, skip[0]) : null,
+    nextBtn);
+}
+
+function feature(ic, title, text) {
+  return h("div", { class: "feature" }, h("span", { class: "ico" }, icon(ic)), h("div", {}, h("div", { class: "t" }, title), h("div", { class: "s" }, text)));
+}
+
+function stepWelcome({ st }) {
+  const name = h("input", { type: "text", value: st.my_name, placeholder: "Your first name", autocomplete: "given-name" });
+  const lang = h("select", {}, LANGS.map((l) => h("option", { value: l }, l)));
+  lang.value = LANGS.includes(st.summary_language) ? st.summary_language : "English";
+  return [
+    h("h1", { class: "wiz-title" }, "Welcome to Beseder"),
+    h("p", { class: "wiz-lead" }, "One calm inbox for all your mailboxes, with an AI assistant that works for you, not instead of you. Setup takes about 5 minutes."),
+    h("div", { class: "features" },
+      feature("tag", "Sorts your mail", "Important, newsletters, receipts… filed as mail arrives."),
+      feature("sparkles", "Briefs you", "One tap to know what matters in your unread mail."),
+      feature("reply", "Drafts replies", "Only when you ask. You review it and send it yourself."),
+      feature("shield", "Never acts alone", "It cannot send, delete or forward anything.")),
+    field("What should we call you?", name),
+    field("Language for your briefs", lang, "Drafts always use the language of the email you reply to."),
+    wizNav({ next: async () => {
+      await api("/api/settings/profile", { method: "PUT", body: { name: name.value, summary_language: lang.value } });
+      wizGo(1);
+    }, nextLabel: "Let's start" }),
+  ];
+}
+
+function stepMailboxes({ accounts, outlook }) {
+  return [
+    h("h1", { class: "wiz-title" }, "Connect your mailboxes"),
+    h("p", { class: "wiz-lead" }, "Add as many as you like. Beseder reads them, and only writes a draft when you ask it to."),
+    accounts.length ? h("div", { class: "connected" }, accounts.map((a) => h("div", { class: "row-item" },
+      avatar(a.name, a.email, "sm"), h("div", { class: "grow" }, h("div", { class: "t" }, a.name), h("div", { class: "s" }, a.email)),
+      h("span", { class: "tag dark" }, "✓ Connected")))) : null,
+    accounts.length ? h("h3", { class: "wiz-sub" }, "Add another one") : null,
+    mailboxSetup(outlook, () => renderWelcome()),
+    wizNav({ back: () => wizGo(0), skip: accounts.length ? null : ["Skip for now", () => wizGo(2)],
+      next: async () => wizGo(2), nextDisabled: !accounts.length }),
+  ];
+}
+
+function stepAI({ ai, st }) {
+  const key = wiz.preset || (st.ai_configured ? ai.preset : null);
+  const order = ["openrouter", "google", "ollama", "anthropic", "claude_cli", "custom"];
+  const box = h("div");
+  const nav = () => wizNav({ back: () => wizGo(1), skip: st.ai_configured ? null : ["Skip, I'll do it later", () => wizGo(3)],
+    next: async () => wizGo(3), nextDisabled: !state.status.ai_configured });
+  let navEl = nav();
+  if (key) box.replaceChildren(aiSetup(key, ai, st.in_docker, async (label) => {
+    wiz.aiLabel = label;
+    await refreshStatus();
+    const fresh = nav();
+    navEl.replaceWith(fresh);
+    navEl = fresh;
+  }));
+  return [
+    h("h1", { class: "wiz-title" }, "Connect your AI"),
+    h("p", { class: "wiz-lead" }, "Pick one. Free options work well to start, and you can switch any time in Settings."),
+    h("div", { class: "choice-grid" }, order.map((k) => {
+      const p = ai.presets[k];
+      return choice(k === key, () => { wiz.preset = k; renderWelcome(); }, h("span", {}, icon(k === "ollama" ? "shield" : k === "custom" ? "settings" : "sparkles")),
+        p.label, p.tagline, p.badge);
+    })),
+    box,
+    navEl,
+  ];
+}
+
+function stepFinish({ accounts, st }) {
+  const triage = h("input", { type: "checkbox", checked: st.ai_configured, disabled: !st.ai_configured });
+  const check = (ok, text) => h("div", { class: "row-item" }, h("span", { class: "ico" + (ok ? " ok" : "") }, ok ? "✓" : "–"), h("div", { class: "grow t" }, text));
+  return [
+    h("h1", { class: "wiz-title" }, "You're all set"),
+    h("p", { class: "wiz-lead" }, "One last choice, then your inbox."),
+    h("label", { class: "big-switch" }, h("div", { class: "grow" }, h("div", { class: "t" }, "Sort new mail automatically"),
+      h("div", { class: "s" }, st.ai_configured ? "The AI files each new email into a category. You can turn it off any time." : "Connect an AI first to use auto-triage.")),
+      h("span", { class: "switch" }, triage, h("span", { class: "track" }))),
+    h("div", { class: "checklist" },
+      check(!!st.my_name, st.my_name ? `Hi ${st.my_name.split(" ")[0]}!` : "No name set"),
+      check(accounts.length > 0, accounts.length ? `${accounts.length} mailbox${accounts.length > 1 ? "es" : ""} connected` : "No mailbox yet (add one in Settings)"),
+      check(st.ai_configured, st.ai_configured ? `AI connected: ${wiz.aiLabel || st.ai_label}` : "No AI yet (add one in Settings)")),
+    h("div", { class: "notice" }, "On iPhone: in Safari, tap Share › Add to Home Screen to use Beseder like an app."),
+    wizNav({ back: () => wizGo(2), nextLabel: "Open my inbox", next: async () => {
+      if (st.ai_configured) await api("/api/settings/triage", { method: "PUT", body: { auto: triage.checked } });
+      await api("/api/settings/onboarded", { method: "PUT", body: { done: true } });
+      wiz.step = 0;
+      $("list-col").dataset.ready = "";
+      go("#/");
+    } }),
+  ];
+}
+
+function setupCard() {
+  return h("div", { class: "card" },
+    h("h2", {}, "Help"),
+    h("p", { class: "muted small", style: "margin:0" }, "Run the setup assistant again, or read the guides."),
+    h("div", { class: "btns" },
+      h("button", { class: "pill sm", onclick: () => { wiz.step = 0; wiz.preset = null; go("#/welcome"); } }, "Run setup again"),
+      h("a", { class: "pill sm", href: `${DOCS}/README.md`, target: "_blank", rel: "noopener" }, "Open the docs")));
 }
 
 function aiCard(ai) {

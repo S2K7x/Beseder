@@ -65,7 +65,7 @@ class MailService:
 
     @staticmethod
     def test_login(host: str, port: int, username: str, password: str) -> None:
-        with IMAPClient(host, port=port, ssl=True, timeout=30) as client:
+        with IMAPClient(host, port=port, ssl=True, timeout=15) as client:
             client.login(username, password)
             client.select_folder("INBOX", readonly=True)
 

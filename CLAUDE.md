@@ -26,9 +26,11 @@ Everything (UI, API messages, prompts, docs, comments) is in English.
 
 ## Commands
 
-- Install: `pip install -r requirements.txt`
+- Install: `pip install -r requirements-dev.txt`
 - Run: `python -m beseder` (listens on 127.0.0.1:8000 by default)
 - Tests: `python -m pytest -q`
+- Docker: `docker compose up -d` (image in `Dockerfile`, data in the `beseder-data` volume)
+- User docs live in `docs/`: keep them in sync when a setup step or a screen changes.
 
 ## Layout
 
@@ -36,3 +38,5 @@ Everything (UI, API messages, prompts, docs, comments) is in English.
 - `beseder/ai/`: pluggable AI providers + tasks (triage, brief, draft)
 - `beseder/main.py`: API routes
 - `web/`: the PWA (three columns on desktop, bottom tab bar on phones)
+- The first-run setup assistant is in `web/app.js` (`renderWelcome`); it reuses the guided
+  mailbox and AI setup also shown in Settings.

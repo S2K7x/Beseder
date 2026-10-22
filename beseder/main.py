@@ -12,7 +12,7 @@ from imapclient.exceptions import IMAPClientError, LoginError
 from pydantic import BaseModel
 
 from .ai import tasks
-from .ai.providers import PRESETS, AIError, make_provider
+from .ai.providers import AIError, make_provider, presets_for
 from .config import Config
 from .db import now_iso
 from .mail.imap import PRESETS as MAIL_PRESETS
@@ -82,6 +82,10 @@ class AIIn(BaseModel):
     command: str = "claude"
 
 
+class OnboardedIn(BaseModel):
+    done: bool = True
+
+
 class ProfileIn(BaseModel):
     name: str = ""
     summary_language: str = "English"
@@ -125,7 +129,20 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     def ai_error(e: AIError):
         raise HTTPException(502, str(e))
 
+    presets = presets_for(config.in_docker)
+
     # --- status -----------------------------------------------------------
+    @app.get("/api/health")
+    def health():
+        return {"ok": True}
+
+    @app.put("/api/settings/onboarded")
+    async def set_onboarded(body: OnboardedIn):
+        core.db.set_setting("onboarded", body.done)
+        if body.done:
+            spawn(core.sync_all())
+        return {"onboarded": body.done}
+
     @app.get("/api/status")
     def status():
         with core.db.conn() as c:
@@ -148,10 +165,13 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             "categories": tasks.CATEGORIES,
             "auto_triage": core.auto_triage,
             "ai_configured": cfg.configured,
-            "ai_label": PRESETS.get(cfg.preset, {}).get("label", ""),
+            "ai_label": presets.get(cfg.preset, {}).get("label", ""),
             "syncing": core.status["syncing"],
             "triage_error": core.status["triage_error"],
             "my_name": core.db.get_setting("my_name", ""),
+            "summary_language": core.db.get_setting("summary_language", "English"),
+            "onboarded": core.onboarded,
+            "in_docker": config.in_docker,
         }
 
     # --- messages ---------------------------------------------------------
@@ -309,7 +329,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     def get_ai():
         cfg = core.ai_config()
         return {
-            "presets": PRESETS,
+            "presets": presets,
             "preset": cfg.preset,
             "base_url": cfg.base_url,
             "model": cfg.model,
@@ -348,7 +368,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     async def list_models(body: AIIn):
         """Lists models using the form values (before saving)."""
         cfg = core.ai_config()
-        preset = PRESETS.get(body.preset)
+        preset = presets.get(body.preset)
         if not preset:
             raise HTTPException(400, "Unknown provider")
         cfg.kind = preset["kind"]
@@ -399,7 +419,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         except LoginError:
             raise HTTPException(400, "Login rejected. Use an app password.")
         except (IMAPClientError, OSError) as e:
-            raise HTTPException(400, f"Cannot connect: {e}")
+            raise HTTPException(400, f"Cannot reach {host}:{port} ({e}). Check the address and the server name.")
         account_id = insert_account(body.kind, body.name, body.email.strip(), host, port, username, {"password": password})
         spawn(core.sync_all())
         return {"id": account_id}

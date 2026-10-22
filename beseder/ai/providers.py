@@ -9,6 +9,7 @@ None of them gives the AI any tool (see CLAUDE.md).
 """
 
 import asyncio
+import copy
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -20,6 +21,9 @@ PRESETS = {
     "openrouter": {
         "kind": "openai_compat",
         "label": "OpenRouter",
+        "tagline": "Free models, one key for many AIs",
+        "badge": "Free",
+        "key_url": "https://openrouter.ai/settings/keys",
         "base_url": "https://openrouter.ai/api/v1",
         "needs_key": True,
         "note": "\":free\" models cost nothing, but some of their providers may keep or use your "
@@ -28,6 +32,9 @@ PRESETS = {
     "google": {
         "kind": "openai_compat",
         "label": "Google AI Studio (Gemini)",
+        "tagline": "Gemini, generous free tier",
+        "badge": "Free",
+        "key_url": "https://aistudio.google.com/apikey",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "needs_key": True,
         "note": "On the free tier, Google may use your prompts (so your emails) to improve its "
@@ -36,6 +43,9 @@ PRESETS = {
     "ollama": {
         "kind": "openai_compat",
         "label": "Ollama (local)",
+        "tagline": "Runs on your own hardware",
+        "badge": "Private",
+        "key_url": "https://ollama.com/download",
         "base_url": "http://localhost:11434/v1",
         "needs_key": False,
         "note": "Everything stays at home. A Pi is slow with large models: pick a small one, "
@@ -43,7 +53,10 @@ PRESETS = {
     },
     "anthropic": {
         "kind": "anthropic",
-        "label": "Claude (API Anthropic)",
+        "label": "Claude (Anthropic API)",
+        "tagline": "Best quality, pay as you go",
+        "badge": "Paid",
+        "key_url": "https://console.anthropic.com/settings/keys",
         "base_url": "",
         "needs_key": True,
         "model": "claude-opus-5-5",
@@ -53,6 +66,9 @@ PRESETS = {
     "claude_cli": {
         "kind": "claude_cli",
         "label": "Claude Code on the Pi",
+        "tagline": "Uses your Claude subscription",
+        "badge": "Subscription",
+        "key_url": "",
         "base_url": "",
         "needs_key": False,
         "model": "",
@@ -62,6 +78,9 @@ PRESETS = {
     "custom": {
         "kind": "openai_compat",
         "label": "Other (OpenAI-compatible)",
+        "tagline": "Groq, Mistral, LM Studio…",
+        "badge": "",
+        "key_url": "",
         "base_url": "",
         "needs_key": False,
         "note": "",
@@ -70,6 +89,14 @@ PRESETS = {
 
 # Claude models that accept `fallbacks: "default"` (safety decline -> another model).
 _FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"}
+
+
+def presets_for(in_docker: bool) -> dict:
+    """Inside Docker, "localhost" is the container itself: Ollama runs on the host."""
+    presets = copy.deepcopy(PRESETS)
+    if in_docker:
+        presets["ollama"]["base_url"] = "http://host.docker.internal:11434/v1"
+    return presets
 
 
 class AIError(Exception):
@@ -211,7 +238,10 @@ class ClaudeCLIProvider(Provider):
                     stderr=asyncio.subprocess.PIPE,
                 )
             except FileNotFoundError:
-                raise AIError(f"Command not found: {self.cfg.command}")
+                raise AIError(
+                    f"Command not found: {self.cfg.command}. With Docker, rebuild the image with "
+                    "WITH_CLAUDE_CLI=true (see docs/ai.md)."
+                )
             try:
                 out, err = await asyncio.wait_for(proc.communicate(user.encode()), self.TIMEOUT)
             except asyncio.TimeoutError:
