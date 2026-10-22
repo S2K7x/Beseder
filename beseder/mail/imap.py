@@ -42,10 +42,15 @@ class LoginRejected(Exception):
 
 FETCH_CHUNK = 25
 FLAG_REFRESH_LIMIT = 1000
+QUICK_FLAG_REFRESH_LIMIT = 200  # syncs triggered by IDLE: recent mail only, the periodic sync does the rest
 IDLE_RENEW = 25 * 60  # servers drop IDLE after ~29 minutes (RFC 2177)
 ARCHIVE_NAMES = ("Archive", "Archives", "INBOX.Archive")
-# Folders a user may move mail into. Trash is left out on purpose: no deleting.
-NOT_A_TARGET = {b"\\Noselect", b"\\NonExistent", b"\\Trash", b"\\Drafts"}
+# Folders a user may move mail into. Trash is left out on purpose (no deleting); the others
+# make no sense as a destination (Sent, Gmail's Starred/Important/All Mail views).
+NOT_A_TARGET = {b"\\Noselect", b"\\NonExistent", b"\\Trash", b"\\Drafts", b"\\Sent",
+                b"\\Flagged", b"\\Important", b"\\All"}
+GMAIL = b"X-GM-EXT-1"
+OWN_WRITE_ECHO = 10  # seconds during which IDLE events caused by our own writes are ignored
 
 
 class MailService:
@@ -57,6 +62,7 @@ class MailService:
         # Messages read in Beseder but not yet flagged on the server: account_id -> uids.
         self._pending_seen: dict[int, set[int]] = {}
         self._seen_lock = threading.Lock()
+        self._last_write: dict[int, float] = {}  # account_id -> monotonic time of our last write
 
     # --- connection ---------------------------------------------------
     def _save_secret(self, account_id: int):
@@ -101,7 +107,7 @@ class MailService:
             return c.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
 
     # --- sync ---------------------------------------------------------
-    def sync_account(self, account_id: int) -> int:
+    def sync_account(self, account_id: int, quick: bool = False) -> int:
         """Imports new INBOX messages and refreshes flags. Returns the number of new messages."""
         account = self.get_account(account_id)
         if account is None:
@@ -109,7 +115,7 @@ class MailService:
         try:
             with self.connect(account) as client:
                 self._send_seen(client, account_id)
-                new = self._sync_inbox(client, account)
+                new = self._sync_inbox(client, account, quick)
             with self.db.conn() as c:
                 c.execute("UPDATE accounts SET last_sync=?, last_error=NULL WHERE id=?", (now_iso(), account_id))
             return new
@@ -119,7 +125,7 @@ class MailService:
                 c.execute("UPDATE accounts SET last_error=? WHERE id=?", (str(e)[:300], account_id))
             return 0
 
-    def _sync_inbox(self, client: IMAPClient, account) -> int:
+    def _sync_inbox(self, client: IMAPClient, account, quick: bool = False) -> int:
         info = client.select_folder("INBOX", readonly=True)
         uidvalidity = int(info.get(b"UIDVALIDITY", 0))
         last_uid = account["last_uid"]
@@ -188,17 +194,17 @@ class MailService:
 
         with self.db.conn() as c:
             c.execute("UPDATE accounts SET uidvalidity=? WHERE id=?", (uidvalidity, account["id"]))
-        self._refresh_flags(client, account["id"])
+        self._refresh_flags(client, account["id"], QUICK_FLAG_REFRESH_LIMIT if quick else FLAG_REFRESH_LIMIT)
         return new
 
-    def _refresh_flags(self, client: IMAPClient, account_id: int) -> None:
+    def _refresh_flags(self, client: IMAPClient, account_id: int, limit: int = FLAG_REFRESH_LIMIT) -> None:
         """Read state changed on the phone, messages deleted elsewhere: catch up with the server."""
         with self.db.conn() as c:
             known = [
                 r["uid"]
                 for r in c.execute(
                     "SELECT uid FROM messages WHERE account_id=? ORDER BY uid DESC LIMIT ?",
-                    (account_id, FLAG_REFRESH_LIMIT),
+                    (account_id, limit),
                 )
             ]
         if not known:
@@ -235,6 +241,7 @@ class MailService:
         try:
             client.select_folder("INBOX")
             client.add_flags(uids, [b"\\Seen"])
+            self._last_write[account_id] = time.monotonic()
         except Exception:
             with self._seen_lock:  # keep them for the next attempt (next read or next sync)
                 self._pending_seen.setdefault(account_id, set()).update(uids)
@@ -261,6 +268,21 @@ class MailService:
             raise LookupError("Message not found")
         return m
 
+    def load_full(self, message_id: int) -> None:
+        """For a message too big to import at sync time: fetches it entirely, on request."""
+        m = self._message(message_id)
+        with self.connect(self.get_account(m["account_id"])) as client:
+            client.select_folder("INBOX", readonly=True)
+            data = client.fetch([m["uid"]], ["BODY.PEEK[]"]).get(m["uid"])
+        if not data:
+            raise LookupError("This message is no longer in the inbox")
+        p = parse_message(data[b"BODY[]"])
+        with self.db.conn() as c:
+            c.execute("UPDATE messages SET body_text=?, body_html=?, snippet=?, truncated=0 WHERE id=?",
+                      (p.body_text, p.body_html, p.snippet, message_id))
+            c.executemany("INSERT OR IGNORE INTO attachments(message_id, idx, filename, content_type, size)"
+                          " VALUES(?,?,?,?,?)", [(message_id, *a) for a in p.attachments])
+
     def download_attachment(self, message_id: int, idx: int) -> tuple[str, bytes]:
         """Fetches the message again from the server and returns one attachment."""
         m = self._message(message_id)
@@ -270,6 +292,10 @@ class MailService:
         if not data:
             raise LookupError("This message is no longer in the inbox")
         return extract_attachment(data[b"BODY[]"], idx)
+
+    @staticmethod
+    def _flag_folder(folders, flag: bytes) -> str | None:
+        return next((name for flags, _sep, name in folders if flag in flags), None)
 
     @staticmethod
     def _archive_folder(folders) -> str | None:
@@ -297,19 +323,27 @@ class MailService:
         account = self.get_account(m["account_id"])
         with self.connect(account) as client:
             folders = client.list_folders()
-            if target is None:
-                target = self._archive_folder(folders)
-                if target is None:
-                    client.create_folder("Archive")
-                    target = "Archive"
+            if target is None and client.has_capability(GMAIL):
+                # Gmail's own archive: remove the Inbox label. Works even if "All Mail" is hidden
+                # from IMAP; Undo needs All Mail to find the message again.
+                client.select_folder("INBOX")
+                client.remove_gmail_labels([m["uid"]], ["\\Inbox"])
+                target = self._flag_folder(folders, b"\\All") or ""
             else:
-                flags = next((set(f) for f, _sep, name in folders if name == target), None)
-                if flags is None or flags & NOT_A_TARGET or target.upper() == "INBOX":
-                    raise ValueError("You can't move mail to this folder")
-            if not client.has_capability("MOVE"):
-                raise ValueError("This mail server can't move messages")
-            client.select_folder("INBOX")
-            client.move([m["uid"]], target)
+                if target is None:
+                    target = self._archive_folder(folders)
+                    if target is None:
+                        client.create_folder("Archive")
+                        target = "Archive"
+                else:
+                    flags = next((set(f) for f, _sep, name in folders if name == target), None)
+                    if flags is None or flags & NOT_A_TARGET or target.upper() == "INBOX":
+                        raise ValueError("You can't move mail to this folder")
+                if not client.has_capability("MOVE"):
+                    raise ValueError("This mail server can't move messages")
+                client.select_folder("INBOX")
+                client.move([m["uid"]], target)
+            self._last_write[account["id"]] = time.monotonic()
         with self.db.conn() as c:
             c.execute("DELETE FROM messages WHERE id=?", (message_id,))
         self.db.audit("moved", f"message={message_id} folder={target}")
@@ -317,14 +351,19 @@ class MailService:
 
     def restore(self, account_id: int, folder: str, message_id_header: str) -> bool:
         """Undo a move: finds the message by its Message-ID and puts it back in the inbox."""
-        if not message_id_header:
+        if not message_id_header or not folder:
             return False
         with self.connect(self.get_account(account_id)) as client:
+            folders = client.list_folders()
             client.select_folder(folder)
             uids = client.search(["HEADER", "Message-ID", message_id_header])
             if not uids:
                 return False
-            client.move(uids[-1:], "INBOX")
+            if client.has_capability(GMAIL) and folder == self._flag_folder(folders, b"\\All"):
+                client.add_gmail_labels(uids[-1:], ["\\Inbox"])  # undo Gmail's archive
+            else:
+                client.move(uids[-1:], "INBOX")
+            self._last_write[account_id] = time.monotonic()
         self.db.audit("restored", f"account={account_id} folder={folder}")
         return True
 
@@ -348,8 +387,11 @@ class MailService:
                     client.idle()
                     while not stop.is_set() and time.monotonic() - started < IDLE_RENEW:
                         responses = client.idle_check(timeout=30)
+                        events = {r[1] for r in responses if len(r) > 1}
                         # New mail (EXISTS), or a message read or deleted elsewhere (FETCH, EXPUNGE).
-                        if any(r[1] in (b"EXISTS", b"EXPUNGE", b"FETCH") for r in responses if len(r) > 1):
+                        # FETCH/EXPUNGE right after our own write are just its echo: skip them.
+                        ours = time.monotonic() - self._last_write.get(account_id, -1e9) < OWN_WRITE_ECHO
+                        if b"EXISTS" in events or (events & {b"EXPUNGE", b"FETCH"} and not ours):
                             client.idle_done()
                             on_new()
                             client.idle()

@@ -178,3 +178,67 @@ def test_failed_read_marks_are_retried_at_next_sync(core, monkeypatch):
     assert sent == [[10]]
     with core.db.conn() as c:
         assert c.execute("SELECT seen FROM messages").fetchone()[0] == 1
+
+
+class FakeGmail:
+    """Just enough of Gmail's IMAP: X-GM-EXT-1 labels, \\All folder."""
+
+    def __init__(self, all_visible=True):
+        self.calls = []
+        self.all_visible = all_visible
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def has_capability(self, cap):
+        return cap in ("X-GM-EXT-1", b"X-GM-EXT-1", "MOVE")
+
+    def list_folders(self):
+        folders = [((b"\\HasNoChildren",), b"/", "INBOX"), ((b"\\Sent",), b"/", "[Gmail]/Sent Mail")]
+        if self.all_visible:
+            folders.append(((b"\\All",), b"/", "[Gmail]/All Mail"))
+        return folders
+
+    def select_folder(self, name, readonly=False):
+        self.calls.append(("select", name))
+        return {}
+
+    def remove_gmail_labels(self, uids, labels):
+        self.calls.append(("remove_labels", list(uids), labels))
+
+    def add_gmail_labels(self, uids, labels):
+        self.calls.append(("add_labels", list(uids), labels))
+
+    def search(self, criteria):
+        return [99]
+
+    def move(self, uids, folder):
+        raise AssertionError("Gmail archive must use labels, not MOVE")
+
+
+def test_gmail_archive_removes_the_inbox_label_and_undo_adds_it_back(core, monkeypatch):
+    from .conftest import add_message
+
+    acc = add_account(core)
+    mid = add_message(core, acc, 5, message_id="<g@x>")
+    gmail = FakeGmail()
+    monkeypatch.setattr(core.mail, "connect", lambda account: gmail)
+    r = core.mail.move(mid, None)
+    assert r == {"folder": "[Gmail]/All Mail", "account_id": acc, "message_id": "<g@x>"}
+    assert ("remove_labels", [5], ["\\Inbox"]) in gmail.calls
+    assert core.mail.restore(acc, r["folder"], r["message_id"])
+    assert ("add_labels", [99], ["\\Inbox"]) in gmail.calls
+
+
+def test_gmail_archive_without_all_mail_has_no_undo(core, monkeypatch):
+    from .conftest import add_message
+
+    acc = add_account(core)
+    mid = add_message(core, acc, 5, message_id="<g@x>")
+    monkeypatch.setattr(core.mail, "connect", lambda account: FakeGmail(all_visible=False))
+    r = core.mail.move(mid, None)
+    assert r["folder"] == ""
+    assert core.mail.restore(acc, r["folder"], r["message_id"]) is False

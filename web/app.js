@@ -238,6 +238,7 @@ const state = {
   status: null,
   summary: null,
   providers: null,
+  folders: {},  // account_id -> folders the user can move mail into (cached for the session)
   category: "",
   unread: false,
   accountId: "",
@@ -520,8 +521,13 @@ async function renderMessage(col, id) {
 
   let images = false, plain = !m.body_html;
   const bodyBox = h("div", { class: "body" });
+  const loadFull = h("button", { class: "pill sm", onclick: async () => {
+    const done = busy(loadFull, "Loading the full email…");
+    try { await api(`/api/messages/${id}/load-full`, { method: "POST" }); renderMessage(col, id); }
+    catch (e) { toast(e.message); done(); }
+  } }, "Load the full email");
   const renderBody = () => bodyBox.replaceChildren(
-    m.truncated ? h("div", { class: "notice" }, m.snippet) : "",
+    m.truncated ? h("div", { class: "notice" }, "This email is large, so only its headers were imported. ", loadFull) : "",
     !plain ? emailFrame(m.body_html, images) : h("pre", { class: "text" }, m.body_text || m.snippet));
   renderBody();
 
@@ -553,7 +559,7 @@ async function renderMessage(col, id) {
       movePicker.hidden = false;
       movePicker.replaceChildren(h("span", { class: "small muted" }, "Loading folders…"));
       try {
-        const f = await api(`/api/accounts/${m.account_id}/folders`);
+        const f = state.folders[m.account_id] ||= await api(`/api/accounts/${m.account_id}/folders`);
         const sel = h("select", { "aria-label": "Folder" }, h("option", { value: "" }, "Move to…"),
           f.folders.map((name) => h("option", { value: name }, name)));
         sel.addEventListener("change", () => { if (sel.value) moveMessage(m, sel.value, moveBtn); });
@@ -597,7 +603,7 @@ async function moveMessage(m, folder, btn) {
   const card = document.querySelector(`.mail-card[data-id="${m.id}"]`);
   const next = card?.nextElementSibling?.dataset?.id || card?.previousElementSibling?.dataset?.id;
   card?.remove();
-  const undo = r.message_id ? { label: "Undo", run: async () => {
+  const undo = r.message_id && r.folder ? { label: "Undo", run: async () => {
     try {
       await api(`/api/accounts/${r.account_id}/restore`, { method: "POST", body: { folder: r.folder, message_id: r.message_id } });
       toast("Back in your inbox");
@@ -1353,14 +1359,21 @@ $("search").addEventListener("input", (e) => {
 $("account-filter").addEventListener("change", (e) => { state.accountId = e.target.value; navigateList(); });
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
-// New mail arrives within seconds (IMAP IDLE): poll the cheap status and refresh when it changed.
-setInterval(async () => {
-  if (document.visibilityState !== "visible" || ["settings", "welcome"].includes(state.view)) return;
+// New mail is synced within a second of arriving (IMAP IDLE) and the server tells this page
+// right away (server-sent events). A slow poll stays as a safety net.
+async function refreshIfChanged() {
+  if (["settings", "welcome"].includes(state.view)) return;
   const before = state.status?.version;
   await refreshStatus();
   if (before !== undefined && state.status && state.status.version !== before) {
     $("list-col").dataset.ready = "";
     renderChrome(); renderSide(); renderList();
   }
-}, 10000);
+}
+if ("EventSource" in window) {
+  new EventSource("/api/events").onmessage = (e) => {
+    if (state.status && Number(e.data) !== state.status.version) refreshIfChanged();
+  };
+}
+setInterval(() => { if (document.visibilityState === "visible") refreshIfChanged(); }, 30000);
 route();

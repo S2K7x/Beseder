@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from imapclient.exceptions import IMAPClientError
 from pydantic import BaseModel
@@ -171,6 +171,23 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             spawn(core.sync_all())
         return {"onboarded": body.done}
 
+    @app.get("/api/events")
+    async def events(request: Request):
+        """Server-sent events: the page hears about new mail as soon as it is synced."""
+        async def stream():
+            last = None
+            while not await request.is_disconnected():
+                version = core.status["version"]
+                if version != last:
+                    last = version
+                    yield f"data: {version}\n\n"
+                else:
+                    yield ": keep-alive\n\n"
+                await core.wait_change(timeout=25)
+
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
     @app.get("/api/status")
     def status():
         with core.db.conn() as c:
@@ -272,9 +289,20 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             raise HTTPException(502, f"IMAP error: {e}")
         # Always a download, never rendered: an HTML or SVG attachment must not run in Beseder's page.
         return Response(data, media_type="application/octet-stream", headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name, safe='')}",
             "Content-Security-Policy": "sandbox; default-src 'none'",
         })
+
+    @app.post("/api/messages/{message_id}/load-full")
+    async def load_full(message_id: int):
+        get_message(message_id)
+        try:
+            await asyncio.to_thread(core.mail.load_full, message_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        except (IMAPClientError, OSError, PermissionError) as e:
+            raise HTTPException(502, f"IMAP error: {e}")
+        return {"ok": True}
 
     @app.post("/api/messages/{message_id}/move")
     async def move_message(message_id: int, body: MoveIn):

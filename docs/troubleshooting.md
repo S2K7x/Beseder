@@ -68,6 +68,11 @@ Beseder keeps a live connection to each inbox (IMAP IDLE) and shows new mail wit
 seconds. A few providers don't support it: Beseder then checks every 5 minutes. The logs
 say "has no IMAP IDLE" for those mailboxes.
 
+## Gmail: no Undo after archiving
+
+Undo looks for the email in "All Mail". In Gmail on the web, open Settings › Labels and tick
+**Show in IMAP** for All Mail. Archiving itself works either way.
+
 ## Archive or Move says the server can't move messages
 
 Your provider doesn't support the IMAP MOVE command. Archive the email from your usual mail

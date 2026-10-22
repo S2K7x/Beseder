@@ -36,6 +36,7 @@ class Beseder:
         self._watchers: dict[int, threading.Event] = {}
         self._sync_soon: set[int] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._changed = asyncio.Event()
         self._provider: Provider | None = None
         self._provider_key = None
 
@@ -173,19 +174,31 @@ class Beseder:
                 for account_id in ids:
                     new += await asyncio.to_thread(self.mail.sync_account, account_id)
                 await self.after_sync()
-                self.status["version"] += 1
+                self.mark_changed()
                 return new
             finally:
                 self.status["syncing"] = False
+
+    def mark_changed(self) -> None:
+        """The mail list changed: wake up the pages listening on /api/events."""
+        self.status["version"] += 1
+        self._changed.set()
+        self._changed = asyncio.Event()
+
+    async def wait_change(self, timeout: float) -> None:
+        try:
+            await asyncio.wait_for(self._changed.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
 
     async def sync_one(self, account_id: int) -> int:
         """Syncs one mailbox now (new mail announced by IDLE). Waits for a running sync."""
         async with self.sync_lock:
             self.status["syncing"] = True
             try:
-                new = await asyncio.to_thread(self.mail.sync_account, account_id)
+                new = await asyncio.to_thread(self.mail.sync_account, account_id, True)
                 await self.after_sync()
-                self.status["version"] += 1
+                self.mark_changed()
                 return new
             finally:
                 self.status["syncing"] = False
@@ -285,7 +298,7 @@ class Beseder:
             return
         self._sync_soon.add(account_id)
         try:
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         finally:
             self._sync_soon.discard(account_id)
         await self.sync_one(account_id)

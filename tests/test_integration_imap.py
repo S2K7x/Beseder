@@ -8,6 +8,7 @@ Run a throwaway Dovecot (self-signed TLS, any user, password "qa-pass"):
 
 import os
 import ssl
+import time
 import uuid
 from email.message import EmailMessage
 from functools import partial
@@ -212,5 +213,48 @@ def test_idle_announces_new_mail(env):
     s.append("INBOX", mail(77))
     assert arrived.wait(15), "IDLE did not report the new message"
     print(f"IDLE reported new mail after {time.monotonic() - started:.1f}s")
+    stop.set()
+    s.logout()
+
+
+def test_big_message_can_be_loaded_in_full(env):
+    core, client, account_id, user = env
+    s = server(user)
+    m = EmailMessage()
+    m["From"], m["Subject"], m["Message-ID"] = "Bob <bob@example.com>", "Big scan", "<qa-big@example.com>"
+    m.set_content("Here is the scan")
+    m.add_attachment(b"x" * 80_000, maintype="application", subtype="pdf", filename="scan/2026.pdf")
+    s.append("INBOX", m.as_bytes())
+    s.logout()
+    core.mail.sync_account(account_id)
+    (row,) = inbox_rows(core).values()
+    assert row["truncated"] == 1 and client.get(f"/api/messages/{row['id']}").json()["attachments"] == []
+    assert client.post(f"/api/messages/{row['id']}/load-full").status_code == 200
+    full = client.get(f"/api/messages/{row['id']}").json()
+    assert full["truncated"] == 0 and "Here is the scan" in full["body_text"]
+    assert full["attachments"][0]["filename"] == "scan/2026.pdf"
+    r = client.get(f"/api/messages/{row['id']}/attachments/0")
+    assert len(r.content) == 80_000 and "scan%2F2026.pdf" in r.headers["content-disposition"]
+
+
+def test_idle_ignores_the_echo_of_our_own_writes(env):
+    import threading
+
+    core, _client, account_id, user = env
+    s = server(user)
+    s.append("INBOX", mail(1))
+    s.append("INBOX", mail(2))
+    core.mail.sync_account(account_id)
+    rows = sorted(inbox_rows(core).values(), key=lambda r: r["uid"])
+    fired, stop = threading.Event(), threading.Event()
+    threading.Thread(target=core.mail.watch_inbox, args=(account_id, fired.set, stop), daemon=True).start()
+    time.sleep(2)
+    core.mail.queue_seen(rows[0]["id"])
+    core.mail.flush_seen(account_id)          # our own write: its FETCH echo must not trigger a sync
+    assert not fired.wait(4)
+    core.mail._last_write.clear()
+    s.select_folder("INBOX")
+    s.add_flags([rows[1]["uid"]], [b"\\Seen"])  # read on another device: must trigger
+    assert fired.wait(10)
     stop.set()
     s.logout()

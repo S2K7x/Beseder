@@ -33,6 +33,8 @@ Good to know:
 - No App passwords page? It's hidden for accounts using only security keys, Advanced
   Protection, or a work/school account whose admin turned app passwords off.
 - IMAP is always on in Gmail: there is nothing to enable.
+- For **Undo** after archiving, Gmail's "All Mail" must be visible to mail apps (it is by
+  default): Gmail settings › Labels › All Mail › **Show in IMAP**.
 
 ## Outlook
 
@@ -154,8 +156,10 @@ Beseder doesn't support Proton for now.
 - It marks an email as read when you open it, like any mail app.
 - It saves a draft in your **Drafts** folder when you tap the save arrow.
 - It moves an email out of the inbox when **you** tap Archive or Move (with an Undo).
-  Gmail's archive is "All Mail"; other providers use their Archive folder, created if
-  missing. The trash is never offered.
+  On Gmail, archiving removes the Inbox label, exactly like the Gmail app; other providers
+  use their Archive folder, created if missing. The trash is never offered.
+- Emails over 10 MB are imported without their content at first; tap **Load the full
+  email** to get the body and attachments.
 - That's all: no sending, no deleting. Removing a mailbox from Beseder deletes nothing in
   the mailbox itself. Attachments are downloaded from your mailbox when you open them.
 

@@ -67,3 +67,30 @@ def test_broken_charset_does_not_crash():
     )
     p = parse_message(raw)
     assert "llo" in p.body_text
+
+
+def test_inline_images_are_embedded_and_not_listed_as_attachments():
+    from email.utils import make_msgid
+
+    m = EmailMessage()
+    m["From"], m["Subject"] = "a@b.c", "logo"
+    cid = make_msgid()[1:-1]
+    m.set_content("text")
+    m.add_alternative(f'<p>Hi</p><img src="cid:{cid}"><img src="cid:missing@x">', subtype="html")
+    m.get_payload()[1].add_related(b"\x89PNG fake", maintype="image", subtype="png", cid=f"<{cid}>")
+    m.add_attachment(b"%PDF", maintype="application", subtype="pdf", filename="real.pdf")
+    p = parse_message(m.as_bytes())
+    assert "data:image/png;base64," in p.body_html
+    assert [a[1] for a in p.attachments] == ["real.pdf"]
+
+
+def test_svg_inline_images_are_not_embedded():
+    from email.utils import make_msgid
+
+    m = EmailMessage()
+    m["From"], m["Subject"] = "a@b.c", "svg"
+    cid = make_msgid()[1:-1]
+    m.set_content("text")
+    m.add_alternative(f'<img src="cid:{cid}">', subtype="html")
+    m.get_payload()[1].add_related(b"<svg onload='x()'/>", maintype="image", subtype="svg+xml", cid=f"<{cid}>")
+    assert "data:image/svg" not in parse_message(m.as_bytes()).body_html

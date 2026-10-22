@@ -1,5 +1,6 @@
 """Raw message parsing and HTML sanitizing."""
 
+import base64
 import html as html_lib
 import re
 from dataclasses import dataclass, field
@@ -85,11 +86,48 @@ class ParsedMessage:
     attachments: list = field(default_factory=list)  # [(idx, filename, content_type, size)]
 
 
+# Images embedded in the HTML (logos, signatures) referenced as cid:...
+INLINE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}  # no SVG: it can carry scripts
+MAX_INLINE_IMAGE = 512 * 1024
+MAX_INLINE_TOTAL = 2 * 1024 * 1024
+
+
+def _content_id(part) -> str:
+    return str(part.get("Content-ID", "") or "").strip().strip("<>")
+
+
+def _is_inline_image(part) -> bool:
+    return (part.get_content_type().startswith("image/") and bool(_content_id(part))
+            and part.get_content_disposition() != "attachment")
+
+
 def _attachment_parts(msg: EmailMessage) -> list:
+    """Real attachments only: images embedded in the HTML are shown in the message instead."""
     try:
-        return list(msg.iter_attachments())
+        return [p for p in msg.iter_attachments() if not _is_inline_image(p)]
     except Exception:
         return []
+
+
+def embed_inline_images(msg: EmailMessage, html: str) -> str:
+    """Replaces cid: references with data: URIs, so logos and signatures show up offline."""
+    wanted = set(re.findall(r"cid:([^\"'\s>)]+)", html, re.I))
+    if not wanted:
+        return html
+    found, total = {}, 0
+    for part in msg.walk():
+        cid = _content_id(part)
+        if cid not in wanted or part.get_content_type() not in INLINE_TYPES:
+            continue
+        try:
+            data = part.get_payload(decode=True) or b""
+        except Exception:
+            continue
+        if len(data) > MAX_INLINE_IMAGE or total + len(data) > MAX_INLINE_TOTAL:
+            continue
+        total += len(data)
+        found[cid] = f"data:{part.get_content_type()};base64,{base64.b64encode(data).decode()}"
+    return re.sub(r"cid:([^\"'\s>)]+)", lambda m: found.get(m.group(1), m.group(0)), html, flags=re.I)
 
 
 def list_attachments(msg: EmailMessage) -> list[tuple[int, str, str, int]]:
@@ -143,7 +181,7 @@ def parse_message(raw: bytes, fallback_date: datetime | None = None, headers_onl
                 text = _get_content(part)
             part = msg.get_body(preferencelist=("html",))
             if part is not None:
-                html = _get_content(part)
+                html = embed_inline_images(msg, _get_content(part))
         except Exception:
             pass
     if html and not text:
