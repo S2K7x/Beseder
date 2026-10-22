@@ -49,6 +49,7 @@ All settings are environment variables:
 | `beseder/main.py` | HTTP API and PWA serving |
 | `beseder/service.py` | AI config, triage, follow-ups, morning brief, AI search, periodic sync |
 | `beseder/mail/` | IMAP sync (inbox and Sent, read only), parsing and sanitizing, Microsoft OAuth |
+| `beseder/mail/threads.py` | Conversation keys from References / In-Reply-To |
 | `beseder/ai/providers.py` | Pluggable AI providers |
 | `beseder/ai/tasks.py` | Prompts and output validation for triage, briefs, drafts and search |
 | `beseder/unsubscribe.py` | One-click unsubscribe (RFC 8058) with its network guard |

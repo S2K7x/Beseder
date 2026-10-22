@@ -227,7 +227,7 @@ def test_gmail_archive_removes_the_inbox_label_and_undo_adds_it_back(core, monke
     gmail = FakeGmail()
     monkeypatch.setattr(core.mail, "connect", lambda account: gmail)
     r = core.mail.move(mid, None)
-    assert r == {"folder": "[Gmail]/All Mail", "account_id": acc, "message_id": "<g@x>"}
+    assert r == {"folder": "[Gmail]/All Mail", "account_id": acc, "message_id": "<g@x>", "message_ids": ["<g@x>"]}
     assert ("remove_labels", [5], ["\\Inbox"]) in gmail.calls
     assert core.mail.restore(acc, r["folder"], [r["message_id"]]) == 1
     assert ("add_labels", [99], ["\\Inbox"]) in gmail.calls

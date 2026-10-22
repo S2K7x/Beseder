@@ -8,7 +8,9 @@ running on your own Raspberry Pi.
 
 - **Sorts your mail** into Important, Notifications, Newsletters, Promotions, Receipts and Other.
 - **Instant and notified**: new mail shows up within seconds, with a notification for the important ones.
-- **Archive, move, attachments**: process your inbox, with an Undo. The trash is never one tap away.
+- **Conversations**: replies are grouped, with your own answers in the timeline.
+- **Archive, move, snooze, select several**: process your inbox fast, with an Undo and
+  keyboard shortcuts. The trash is never one tap away.
 - **Briefs you**: one tap, or every morning with a notification, the AI tells you what matters.
 - **Follow-ups**: what's waiting for your answer, and who hasn't answered you yet.
 - **Drafts replies in your style**, only when you ask. You read it and send it yourself.
@@ -44,6 +46,11 @@ more command with Tailscale.
 | Understand how Beseder keeps my mail safe | [docs/security.md](docs/security.md) |
 | Fix a problem | [docs/troubleshooting.md](docs/troubleshooting.md) |
 | Change the code | [docs/development.md](docs/development.md) |
+
+## Keyboard shortcuts
+
+`j` / `k` next / previous email · `e` archive · `s` snooze · `r` reply · `x` select ·
+`/` search · `Esc` cancel
 
 ## Everyday commands
 

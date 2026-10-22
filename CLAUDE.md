@@ -50,6 +50,10 @@ Everything (UI, API messages, prompts, docs, comments) is in English.
 - `beseder/unsubscribe.py`: one-click unsubscribe, user click only. https only, every resolved
   address must be public, the connection is pinned to the checked address, no redirects.
   Keep this guard: the URL comes from an email. Search uses the `messages_fts` FTS5 index.
+- Conversations: `beseder/mail/threads.py` gives every message a `thread_key`. The list shows
+  one card per conversation; archive/read act on the whole conversation (same mailbox).
+- Snooze is local only (`snoozed_until`, `resurfaced_at`): never an IMAP write.
+  `Beseder.minute_loop` brings snoozed mail back and runs the morning brief.
 - `web/`: the PWA (three columns on desktop, bottom tab bar on phones)
 - The first-run setup assistant is in `web/app.js` (`renderWelcome`); it reuses the guided
   mailbox and AI setup also shown in Settings.

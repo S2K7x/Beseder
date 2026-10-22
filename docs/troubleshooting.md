@@ -106,6 +106,18 @@ Beseder only unsubscribes in one tap through public `https` links (see
 open the email and use the unsubscribe link at the bottom of the message, or mark the sender
 with the tag button so their mail goes to Promotions.
 
+## A snoozed email still shows in my phone's mail app
+
+That's expected: snooze only exists in Beseder, so it never moves anything on your mail
+server. The email comes back on top of Beseder's inbox at the time you picked. To bring it
+back sooner, tap the **Snoozed** chip above the list, then **Back to inbox now**.
+
+## Two different emails are grouped as one conversation (or the reverse)
+
+Beseder groups by the reply headers mail apps add, not by subject. A few apps leave them
+out: their replies then show as separate emails. Archive and Undo always act on what you
+see grouped.
+
 ## I changed a category but the AI keeps changing it back
 
 It won't: a category you set by hand is never overwritten. To file *all* emails from a

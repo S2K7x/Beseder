@@ -206,7 +206,7 @@ class Beseder:
             to_reply = [dict(r) for r in c.execute(
                 "SELECT m.id, m.account_id, a.name AS account_name, m.subject, m.from_name, m.from_addr, m.date,"
                 " m.snippet, m.seen, m.category FROM messages m JOIN accounts a ON a.id=m.account_id"
-                " WHERE m.needs_reply=1 AND m.answered=0 AND m.followup_done=0 AND m.date>=?"
+                " WHERE m.needs_reply=1 AND m.answered=0 AND m.followup_done=0 AND m.date>=? AND m.snoozed_until IS NULL"
                 " AND (m.category IS NULL OR m.category IN ('important', 'other'))"
                 " AND NOT (COALESCE(m.message_id, '')!='' AND (EXISTS (SELECT 1 FROM sent_messages s"
                 "   WHERE s.in_reply_to=m.message_id) OR EXISTS (SELECT 1 FROM sent_messages s"
@@ -269,7 +269,7 @@ class Beseder:
 
     # --- briefs -----------------------------------------------------------
     async def make_summary(self, account_id: int | None = None) -> dict:
-        sql = "SELECT * FROM messages WHERE seen=0"
+        sql = "SELECT * FROM messages WHERE seen=0 AND snoozed_until IS NULL"
         args: list = []
         if account_id:
             sql += " AND account_id=?"
@@ -340,8 +340,13 @@ class Beseder:
             })
         return True
 
-    async def brief_loop(self) -> None:
+    async def minute_loop(self) -> None:
+        """Snoozed mail coming back, and the morning brief."""
         while True:
+            try:
+                await self.wake_snoozed()
+            except Exception:
+                log.exception("Could not bring snoozed mail back")
             try:
                 await self.morning_brief()
             except AIError as e:
@@ -349,6 +354,80 @@ class Beseder:
             except Exception:
                 log.exception("Morning brief failed")
             await asyncio.sleep(60)
+
+    # --- conversations and snooze -------------------------------------------
+    def thread_ids(self, message_ids: list[int]) -> list[int]:
+        """The given messages plus the rest of their conversations (same mailbox)."""
+        ids = list(dict.fromkeys(message_ids))[:500]
+        if not ids:
+            return []
+        with self.db.conn() as c:
+            rows = c.execute(
+                f"SELECT DISTINCT t.id FROM messages m JOIN messages t ON t.id=m.id OR (m.thread_key!=''"
+                f" AND t.thread_key=m.thread_key AND t.account_id=m.account_id) WHERE m.id IN ({','.join('?' * len(ids))})",
+                ids).fetchall()
+        return [r[0] for r in rows]
+
+    def conversation(self, m: dict, limit: int = 30) -> list[dict]:
+        """The other messages of a conversation, received and sent, oldest first."""
+        if not m.get("thread_key"):
+            return []
+        with self.db.conn() as c:
+            items = [dict(r, kind="received") for r in c.execute(
+                "SELECT id, from_name AS name, from_addr AS addr, date, substr(body_text, 1, 3000) AS body_text, seen"
+                " FROM messages WHERE thread_key=? AND id!=? ORDER BY date DESC LIMIT ?",
+                (m["thread_key"], m["id"], limit))]
+            items += [dict(r, kind="sent") for r in c.execute(
+                "SELECT id, to_name AS name, to_addr AS addr, date, substr(body_text, 1, 3000) AS body_text"
+                " FROM sent_messages WHERE thread_key=? ORDER BY date DESC LIMIT ?", (m["thread_key"], limit))]
+        items.sort(key=lambda it: it["date"])
+        return items[-limit:]
+
+    def snooze(self, ids: list[int], until: str | None) -> None:
+        """Hides mail from the inbox until a date. Only in Beseder: nothing changes on the server."""
+        value = None
+        if until:
+            try:
+                when = datetime.fromisoformat(until.replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError("Invalid date")
+            if when.tzinfo is None:
+                raise ValueError("The date needs a time zone")
+            now = datetime.now(timezone.utc)
+            if not now < when < now + timedelta(days=366):
+                raise ValueError("Pick a time in the next 12 months")
+            value = when.astimezone(timezone.utc).isoformat(timespec="seconds")
+        with self.db.conn() as c:
+            c.executemany("UPDATE messages SET snoozed_until=?, resurfaced_at=NULL WHERE id=?",
+                          [(value, i) for i in ids])
+        self._followups = None
+
+    async def wake_snoozed(self) -> int:
+        """Snoozed mail whose time has come goes back on top of the inbox, with a notification."""
+        now = now_iso()
+        with self.db.conn() as c:
+            rows = [dict(r) for r in c.execute(
+                "SELECT m.id, m.subject, m.from_name, m.from_addr, a.name AS account FROM messages m"
+                " JOIN accounts a ON a.id=m.account_id WHERE m.snoozed_until<=? ORDER BY m.date", (now,))]
+            c.executemany("UPDATE messages SET snoozed_until=NULL, resurfaced_at=? WHERE id=?",
+                          [(now, r["id"]) for r in rows])
+        if not rows:
+            return 0
+        self.mark_changed()
+        if self.db.get_setting("push_mode", "important") != "off" and self.push.count():
+            note = self._notification(rows)
+            note["title"] = f"Back from snooze: {note['title']}" if len(rows) == 1 else f"{len(rows)} emails back from snooze"
+            await self.push.send(note)
+        return len(rows)
+
+    async def archive_ids(self, ids: list[int]) -> list[dict]:
+        with self.db.conn() as c:
+            rows = c.execute(f"SELECT id, account_id FROM messages WHERE id IN ({','.join('?' * len(ids))})",
+                             ids).fetchall()
+        by_account: dict[int, list[int]] = {}
+        for r in rows:
+            by_account.setdefault(r["account_id"], []).append(r["id"])
+        return [await asyncio.to_thread(self.mail.move_many, a, i, None) for a, i in by_account.items()]
 
     # --- search -----------------------------------------------------------
     async def ask_search(self, question: str, account_id: int | None = None) -> dict:
@@ -404,14 +483,8 @@ class Beseder:
     async def archive_sender(self, addr: str) -> list[dict]:
         """Archives everything from one sender, in every mailbox. Returns what to undo."""
         with self.db.conn() as c:
-            rows = c.execute("SELECT id, account_id FROM messages WHERE from_addr=?", (addr.lower(),)).fetchall()
-        by_account: dict[int, list[int]] = {}
-        for r in rows:
-            by_account.setdefault(r["account_id"], []).append(r["id"])
-        done = []
-        for account_id, ids in by_account.items():
-            done.append(await asyncio.to_thread(self.mail.move_many, account_id, ids, None))
-        return done
+            ids = [r[0] for r in c.execute("SELECT id FROM messages WHERE from_addr=?", (addr.lower(),))]
+        return await self.archive_ids(ids) if ids else []
 
     # --- sync -----------------------------------------------------------
     async def sync_all(self) -> int:

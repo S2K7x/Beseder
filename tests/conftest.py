@@ -55,14 +55,14 @@ def add_message(core, account_id, uid, **kw):
     row = {
         "subject": f"Subject {uid}", "from_name": "Alice", "from_addr": "alice@example.com",
         "date": f"2026-10-{10 + uid % 10:02d}T10:00:00+00:00", "snippet": "excerpt", "body_text": "body",
-        "seen": 0, "category": None, "message_id": f"<m{uid}@example.com>",
+        "seen": 0, "category": None, "message_id": f"<m{uid}@example.com>", "thread_key": "",
     }
     row.update(kw)
     with core.db.conn() as c:
         cur = c.execute(
             "INSERT INTO messages(account_id, uid, message_id, subject, from_name, from_addr, date, snippet,"
-            " body_text, seen, category) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            " body_text, seen, category, thread_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (account_id, uid, row["message_id"], row["subject"], row["from_name"], row["from_addr"], row["date"],
-             row["snippet"], row["body_text"], row["seen"], row["category"]),
+             row["snippet"], row["body_text"], row["seen"], row["category"], row["thread_key"]),
         )
         return cur.lastrowid

@@ -307,3 +307,28 @@ def test_bulk_archive_and_undo_on_a_real_server(env):
     s.select_folder("INBOX", readonly=True)
     assert len(s.search("ALL")) == 4
     s.logout()
+
+
+def test_conversation_is_grouped_and_archived_together(env):
+    core, client, account_id, user = env
+    s = server(user)
+    s.append("INBOX", mail(1, subject="Trip"))
+    reply = EmailMessage()
+    reply["From"], reply["Subject"], reply["Message-ID"] = "Bob <bob@example.com>", "Re: Trip", "<qa-reply@example.com>"
+    reply["In-Reply-To"] = reply["References"] = "<qa-1@example.com>"
+    reply["Date"] = "Tue, 20 Oct 2026 10:30:00 +0000"
+    reply.set_content("I'm in")
+    s.append("INBOX", reply.as_bytes())
+    s.append("INBOX", mail(2, subject="Other"))
+    core.mail.sync_account(account_id)
+    cards = client.get("/api/messages").json()
+    assert sorted((c["subject"], c["thread_count"]) for c in cards) == [("Other", 1), ("Re: Trip", 2)]
+    trip = next(c for c in cards if c["subject"] == "Re: Trip")
+    r = client.post(f"/api/messages/{trip['id']}/move", json={"folder": None}).json()
+    assert sorted(r["message_ids"]) == ["<qa-1@example.com>", "<qa-reply@example.com>"]
+    s.select_folder("INBOX", readonly=True)
+    assert len(s.search("ALL")) == 1
+    client.post(f"/api/accounts/{account_id}/restore", json={"folder": r["folder"], "message_ids": r["message_ids"]})
+    s.select_folder("INBOX", readonly=True)
+    assert len(s.search("ALL")) == 3
+    s.logout()

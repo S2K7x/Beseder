@@ -157,8 +157,12 @@ Beseder doesn't support Proton for now.
 - It saves a draft in your **Drafts** folder when you tap the save arrow.
 - It reads your **Sent** folder (read only, last 30 days at first) to know which emails you
   already answered and how you write.
-- It moves an email out of the inbox when **you** tap Archive or Move (with an Undo), or
-  every email from a sender when you choose "Archive all from them" after unsubscribing.
+- It moves an email out of the inbox when **you** tap Archive or Move (with an Undo). Archive
+  takes the whole conversation, like Gmail. You can also select several emails, or choose
+  "Archive all from them" after unsubscribing.
+- **Snooze** happens only in Beseder: the email disappears from Beseder's inbox until the
+  time you picked, then comes back on top (with a notification). Your other mail apps keep
+  showing it.
   On Gmail, archiving removes the Inbox label, exactly like the Gmail app; other providers
   use their Archive folder, created if missing. The trash is never offered.
 - Emails over 10 MB are imported without their content at first; tap **Load the full

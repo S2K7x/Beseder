@@ -47,6 +47,9 @@ const ICONS = {
   bellOff: [["path", "M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"], ["path", "M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"],
     ["path", "M10.3 21a1.94 1.94 0 0 0 3.4 0"], ["path", "m2 2 20 20"]],
   check: [["path", "M20 6 9 17l-5-5"]],
+  checks: [["path", "M18 6 7 17l-5-5"], ["path", "m22 10-7.5 7.5L13 16"]],
+  alarm: [["circle", 12, 13, 8], ["path", "M12 9v4l2 2"], ["path", "M5 3 2 6"], ["path", "m22 6-3-3"]],
+  x: [["path", "M18 6 6 18"], ["path", "m6 6 12 12"]],
   send: [["path", "m22 2-7 20-4-9-9-4Z"], ["path", "M22 2 11 13"]],
   paperclip: [["path", "m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"]],
 };
@@ -185,7 +188,9 @@ function fmtWhen(iso) {
   if (sameDay(d, now)) return `Today · ${time}`;
   const y = new Date(now); y.setDate(now.getDate() - 1);
   if (sameDay(d, y)) return `Yesterday · ${time}`;
-  if (now - d < 6 * 864e5) return `${d.toLocaleDateString("en-GB", { weekday: "long" })} · ${time}`;
+  const t = new Date(now); t.setDate(now.getDate() + 1);
+  if (sameDay(d, t)) return `Tomorrow · ${time}`;
+  if (Math.abs(now - d) < 6 * 864e5) return `${d.toLocaleDateString("en-GB", { weekday: "long" })} · ${time}`;
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: d.getFullYear() === now.getFullYear() ? undefined : "numeric" });
 }
 const fmtTime = (iso) => new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
@@ -249,6 +254,9 @@ const state = {
   accountId: "",
   q: "",
   followups: false,  // list column shows "To reply" / "Waiting for a reply"
+  snoozed: false,    // list column shows snoozed mail
+  selecting: false,  // multi-select mode in the list
+  picked: new Set(), // ids picked in multi-select mode (each stands for its conversation)
   ask: null,         // { question, result } of the last AI search
   selectedId: null,
   view: "inbox",
@@ -302,8 +310,8 @@ function navItems() {
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   const listView = state.view === "inbox" || state.view === "message";
   const follow = state.status?.followups || {};
-  const list = (f) => () => { Object.assign(state, { category: "", unread: false, followups: false, ask: null }, f); navigateList(); };
-  const plain = listView && !state.followups && !state.ask;
+  const list = (f) => () => { Object.assign(state, { category: "", unread: false, followups: false, ask: null, snoozed: false }, f); navigateList(); };
+  const plain = listView && !state.followups && !state.ask && !state.snoozed;
   return [
     { icon: "inbox", label: "Inbox", badge: total, active: plain && !state.category && !state.unread, go: list({}) },
     { icon: "star", label: "Important", badge: counts.important, active: plain && state.category === "important",
@@ -316,6 +324,7 @@ function navItems() {
 
 function navigateList() {
   $("list-col").dataset.ready = "";
+  endSelect(true);
   if (isPhone() || state.view === "settings" || state.view === "brief") go("#/");
   else route();
 }
@@ -365,10 +374,15 @@ async function renderList(before, beforeId) {
     col.replaceChildren(
       miniBrief(),
       h("div", { class: "chips" },
+        h("button", { class: "chip" + (state.selecting ? " active" : ""), title: "Select several (x)", "aria-label": "Select",
+          onclick: () => (state.selecting ? endSelect() : startSelect()) }, icon("checks")),
         h("button", { class: "chip" + (!state.category ? " active" : ""), onclick: () => { state.category = ""; navigateList(); } },
           state.unread ? "All unread" : "All"),
         Object.keys(st.categories).map((k) => chip(k, CATS[k]?.label || k)),
-        counts.untriaged ? chip("untriaged", CATS.untriaged.label) : null),
+        counts.untriaged ? chip("untriaged", CATS.untriaged.label) : null,
+        st.snoozed || state.snoozed ? h("button", { class: "chip" + (state.snoozed ? " active" : ""),
+          onclick: () => { state.snoozed = !state.snoozed; state.category = ""; navigateList(); } },
+          icon("alarm"), "Snoozed", h("span", { class: "count" }, st.snoozed)) : null),
       h("div", { id: "cards", style: "display:flex;flex-direction:column;gap:12px" }));
   }
   if (!st.accounts.length) {
@@ -381,6 +395,7 @@ async function renderList(before, beforeId) {
   if (state.accountId) params.set("account_id", state.accountId);
   if (state.unread) params.set("unread", "true");
   if (state.q) params.set("q", state.q);
+  if (state.snoozed) params.set("snoozed", "true");
   if (before) { params.set("before", before); params.set("before_id", beforeId); }
   let rows;
   try { rows = await api("/api/messages?" + params); } catch (e) { toast(e.message); return; }
@@ -388,13 +403,15 @@ async function renderList(before, beforeId) {
   $("more")?.remove();
   if (!before && rows.length === 0) {
     cards.replaceChildren(h("div", { class: "card empty" }, h("div", { class: "big" }, icon("inbox")),
-      st.syncing ? "Syncing your mailboxes…" : state.q ? "No match." : "Nothing here. Enjoy the quiet."));
+      st.syncing ? "Syncing your mailboxes…" : state.q ? "No match." : state.snoozed ? "Nothing snoozed." : "Nothing here. Enjoy the quiet."));
     return;
   }
   const prio = priorityMap();
   for (const r of rows) cards.append(mailCard(r, prio[r.id]));
-  if (rows.length === 50) {
-    cards.after(h("button", { class: "pill more", id: "more", onclick: () => renderList(rows[rows.length - 1].date, rows[rows.length - 1].id) }, "Load more"));
+  const page = rows.filter((r) => !r.resurfaced);  // mail back from snooze is pinned on top of page one
+  if (page.length === 50) {
+    const last = page[page.length - 1];
+    cards.after(h("button", { class: "pill more", id: "more", onclick: () => renderList(last.date, last.id) }, "Load more"));
   }
   markSelected();
 }
@@ -493,21 +510,151 @@ function priorityMap() {
 
 function mailCard(r, priority) {
   const [first, last] = splitName(r.from_name, r.from_addr);
-  return h("article", {
-    class: "card mail-card" + (r.seen ? "" : " unread"), "data-id": r.id, tabindex: "0",
-    onclick: () => go(`#/m/${r.id}`),
-    onkeydown: (e) => { if (e.key === "Enter") go(`#/m/${r.id}`); },
+  const unread = r.thread_unread !== undefined ? r.thread_unread > 0 : !r.seen;
+  const open = () => (state.selecting ? togglePick(r.id) : go(`#/m/${r.id}`));
+  const card = h("article", {
+    class: "card mail-card" + (unread ? " unread" : "") + (state.picked.has(r.id) ? " picked" : ""), "data-id": r.id, tabindex: "0",
+    onclick: open,
+    onkeydown: (e) => { if (e.key === "Enter") open(); },
   },
     h("div", { class: "who" },
-      avatar(r.from_name, r.from_addr),
+      state.selecting ? h("span", { class: "pick", "aria-hidden": "true" }, icon("check")) : avatar(r.from_name, r.from_addr),
       h("div", { class: "who-name" }, h("span", {}, first), h("span", {}, last || r.account_name)),
+      r.thread_count > 1 ? h("span", { class: "tag", title: `${r.thread_count} emails in this conversation` }, String(r.thread_count)) : null,
       h("span", { class: "round xs", "aria-hidden": "true" }, icon("arrowUpRight"))),
     h("h3", {}, r.subject || "(no subject)"),
     h("div", { class: "when" }, fmtWhen(r.date), state.status.accounts.length > 1 && last ? ` · ${r.account_name}` : ""),
     r.snippet ? h("div", { class: "snippet" }, r.snippet) : null,
-    (r.category || priority === "high") ? h("div", { class: "tags" },
+    (r.category || priority === "high" || r.resurfaced || r.snoozed_until) ? h("div", { class: "tags" },
+      r.resurfaced ? h("span", { class: "tag dark" }, icon("alarm"), "Back from snooze") : null,
+      r.snoozed_until ? h("span", { class: "tag" }, icon("alarm"), `Until ${fmtWhen(r.snoozed_until)}`) : null,
       priority === "high" ? h("span", { class: "tag high" }, "High priority") : null,
       r.category ? h("span", { class: "tag" }, CATS[r.category]?.label || r.category) : null) : null);
+  if (r.snoozed_until && !state.selecting) {
+    card.append(h("div", { class: "card-actions" }, h("button", { class: "pill sm", onclick: async (e) => {
+      e.stopPropagation();
+      try { await api("/api/messages/bulk", { method: "POST", body: { ids: [r.id], action: "unsnooze" } }); card.remove(); toast("Back in your inbox"); refreshAll(); }
+      catch (err) { toast(err.message); }
+    } }, icon("inbox"), "Back to inbox now")));
+  }
+  return card;
+}
+
+function refreshAll() {
+  refreshStatus().then(() => { renderChrome(); renderSide(); });
+}
+
+// --- multi-select ---------------------------------------------------------------------------
+function startSelect(firstId) {
+  state.selecting = true;
+  state.picked = new Set(firstId ? [firstId] : []);
+  $("list-col").dataset.ready = "";
+  renderList().then(renderBulkBar);
+}
+
+function endSelect(quiet) {
+  if (!state.selecting) return;
+  state.selecting = false;
+  state.picked = new Set();
+  $("bulkbar")?.remove();
+  if (!quiet) { $("list-col").dataset.ready = ""; renderList(); }
+}
+
+function togglePick(id) {
+  if (state.picked.has(id)) state.picked.delete(id); else state.picked.add(id);
+  document.querySelector(`.mail-card[data-id="${id}"]`)?.classList.toggle("picked", state.picked.has(id));
+  renderBulkBar();
+}
+
+function renderBulkBar() {
+  let bar = $("bulkbar");
+  if (!state.selecting) { bar?.remove(); return; }
+  if (!bar) { bar = h("div", { id: "bulkbar", class: "bulkbar", role: "toolbar", "aria-label": "Selected emails" }); document.body.append(bar); }
+  const n = state.picked.size;
+  const cat = h("select", { "aria-label": "Category", disabled: !n }, h("option", { value: "" }, "Category…"),
+    Object.keys(state.status.categories).map((k) => h("option", { value: k }, CATS[k]?.label || k)));
+  cat.addEventListener("change", () => cat.value && bulk("category", { category: cat.value }));
+  const all = h("button", { class: "pill sm", onclick: () => {
+    document.querySelectorAll(".mail-card[data-id]").forEach((c) => state.picked.add(Number(c.dataset.id)));
+    document.querySelectorAll(".mail-card[data-id]").forEach((c) => c.classList.add("picked"));
+    renderBulkBar();
+  } }, "All");
+  const snoozeBtn = h("button", { class: "round sm", title: "Snooze", "aria-label": "Snooze", disabled: !n,
+    onclick: () => snoozePicker(snoozeBtn, (until) => bulk("snooze", { until })) }, icon("alarm"));
+  bar.replaceChildren();
+  put(bar,
+    h("span", { class: "n" }, n ? `${n} selected` : "Tap emails to select"),
+    all,
+    h("button", { class: "round sm", title: "Archive (e)", "aria-label": "Archive", disabled: !n, onclick: () => bulk("archive") }, icon("archive")),
+    h("button", { class: "round sm", title: "Mark as read", "aria-label": "Mark as read", disabled: !n, onclick: () => bulk("read") }, icon("mailOpen")),
+    snoozeBtn,
+    state.snoozed ? h("button", { class: "round sm", title: "Back to inbox now", "aria-label": "Unsnooze", disabled: !n, onclick: () => bulk("unsnooze") }, icon("inbox")) : null,
+    h("label", { class: "select-pill" }, icon("tag"), cat),
+    h("button", { class: "round sm", title: "Done (Esc)", "aria-label": "Stop selecting", onclick: () => endSelect() }, icon("x")));
+}
+
+async function bulk(action, extra = {}) {
+  const ids = [...state.picked];
+  if (!ids.length) return;
+  let r;
+  try { r = await api("/api/messages/bulk", { method: "POST", body: { ids, action, ...extra } }); }
+  catch (e) { toast(e.message); return; }
+  const n = r.count;
+  const what = `${n} email${n === 1 ? "" : "s"}`;
+  const undo = action === "archive" ? undoMoves(r.moved) : action === "snooze"
+    ? { label: "Undo", run: async () => { await api("/api/messages/bulk", { method: "POST", body: { ids, action: "unsnooze" } }); toast("Back in your inbox"); navigateList(); refreshAll(); } }
+    : null;
+  toast({ archive: `${what} archived`, read: `${what} marked as read`, category: `${what} filed in ${CATS[extra.category]?.label}`,
+    snooze: `${what} snoozed until ${extra.until ? fmtWhen(extra.until) : ""}`, unsnooze: `${what} back in your inbox` }[action], undo);
+  endSelect();
+  refreshAll();
+}
+
+// Undo for one or several moves (archive, "archive all from them").
+function undoMoves(moved) {
+  const groups = (moved || []).filter((x) => x.folder && x.message_ids.length);
+  return groups.length ? { label: "Undo", run: async () => {
+    try {
+      for (const x of groups) {
+        await api(`/api/accounts/${x.account_id}/restore`, { method: "POST", body: { folder: x.folder, message_ids: x.message_ids } });
+      }
+      toast("Back in your inbox");
+      setTimeout(() => { $("list-col").dataset.ready = ""; route(); }, 2500);
+    } catch (e) { toast(e.message); }
+  } } : null;
+}
+
+// --- snooze -----------------------------------------------------------------------------------
+function snoozeOptions() {
+  const now = new Date();
+  const at = (days, hour) => { const d = new Date(now); d.setDate(d.getDate() + days); d.setHours(hour, 0, 0, 0); return d; };
+  const toDay = (wd) => (wd - now.getDay() + 7) % 7 || 7;  // days until the next given weekday
+  const opts = [];
+  if (now.getHours() < 18) opts.push(["Later today", new Date(now.getTime() + 3 * 3600e3)]);
+  opts.push(["Tomorrow", at(1, 8)]);
+  if (now.getDay() >= 1 && now.getDay() <= 4) opts.push(["This weekend", at(toDay(6), 9)]);
+  opts.push(["Next week", at(toDay(1), 8)]);
+  return opts;
+}
+
+// A small pop-over under a button: preset times or a custom one. onPick(isoString).
+function snoozePicker(anchor, onPick) {
+  document.querySelector(".snooze-pop")?.remove();
+  const custom = h("input", { type: "datetime-local", "aria-label": "Pick a date and time" });
+  const pick = (d) => { pop.remove(); onPick(d.toISOString()); };
+  const pop = h("div", { class: "card snooze-pop", role: "menu" },
+    h("div", { class: "small muted", style: "margin:0 4px 6px" }, "Snooze until…"),
+    snoozeOptions().map(([label, d]) => h("button", { class: "snooze-opt", role: "menuitem", onclick: () => pick(d) },
+      h("span", {}, label), h("span", { class: "muted small" }, fmtWhen(d.toISOString())))),
+    h("div", { class: "snooze-custom" }, custom,
+      h("button", { class: "pill sm dark", onclick: () => custom.value ? pick(new Date(custom.value)) : toast("Pick a date first") }, "Snooze")));
+  const r = anchor.getBoundingClientRect();
+  pop.style.top = `${Math.min(r.bottom + 8, innerHeight - 330)}px`;
+  pop.style.left = `${Math.max(12, Math.min(r.left, innerWidth - 292))}px`;
+  document.body.append(pop);
+  setTimeout(() => document.addEventListener("click", function off(e) {
+    if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener("click", off); }
+  }), 0);
 }
 
 function markSelected() {
@@ -669,6 +816,8 @@ async function renderMessage(col, id) {
       h("span", { class: "ico" }, icon("paperclip")),
       h("span", { class: "grow" }, h("span", { class: "t" }, a.filename), h("span", { class: "s" }, fmtSize(a.size)))))) : null;
   const replyBtn = h("button", { class: "pill", onclick: () => composer.draft() }, icon("reply"), "Reply with AI");
+  const snoozeBtn = h("button", { class: "round sm", title: "Snooze (s)", "aria-label": "Snooze",
+    onclick: () => snoozePicker(snoozeBtn, (until) => snoozeMessage(m, until)) }, icon("alarm"));
   const unsubBtn = m.unsub_url || m.unsub_mailto ? h("button", { class: "round sm",
     title: m.unsub_one_click ? "Unsubscribe in one tap" : "Unsubscribe", "aria-label": "Unsubscribe",
     onclick: () => unsubscribe(m, unsubBtn) }, icon("bellOff")) : null;
@@ -683,14 +832,56 @@ async function renderMessage(col, id) {
       h("h2", {}, m.from_name || m.from_addr),
       h("div", { class: "sub" }, m.from_name ? `${m.from_addr} · ` : "", `to ${m.account_name}`),
       h("div", { class: "subject" }, m.subject || "(no subject)")),
-    h("div", { class: "actions-row" }, replyBtn, archiveBtn, moveBtn, unsubBtn, ruleBtn, imgBtn, textBtn),
+    h("div", { class: "actions-row" }, replyBtn, archiveBtn, snoozeBtn, moveBtn, unsubBtn, ruleBtn, imgBtn, textBtn),
     m.needs_reply && !m.answered && !m.followup_done ? h("div", { class: "small muted reply-hint" }, icon("clock"),
       "The AI thinks this email expects an answer from you.") : null,
     movePicker,
+    conversation(m),
     bodyBox,
     files,
     composer.el));
   markSelected();
+}
+
+// Earlier messages of the conversation, received and sent, folded: tap one to read it.
+function conversation(m) {
+  const items = m.thread || [];
+  if (!items.length) return null;
+  const me = state.status?.my_name || "You";
+  const box = h("div", { class: "thread" },
+    h("div", { class: "small muted thread-head" }, `Conversation · ${items.length + 1} emails`));
+  for (const it of items) {
+    const sent = it.kind === "sent";
+    const body = h("pre", { class: "text", hidden: true }, it.body_text || "(no text)");
+    const row = h("div", { class: "thread-item" + (sent ? " mine" : "") },
+      h("button", { class: "thread-line", "aria-expanded": "false", onclick: () => {
+        body.hidden = !body.hidden;
+        row.querySelector(".thread-line").setAttribute("aria-expanded", String(!body.hidden));
+      } },
+        avatar(sent ? me : it.name, sent ? me : it.addr, "sm"),
+        h("span", { class: "grow" }, h("span", { class: "t" }, sent ? `${me} → ${it.name || it.addr}` : it.name || it.addr),
+          h("span", { class: "s" }, (it.body_text || "").replace(/\s+/g, " ").slice(0, 120))),
+        h("span", { class: "small muted" }, fmtWhen(it.date))),
+      body,
+      !sent ? h("button", { class: "link", hidden: true, onclick: () => go(`#/m/${it.id}`) }, "Open this email") : null);
+    if (!sent) row.querySelector(".thread-line").addEventListener("click", () => { row.lastChild.hidden = body.hidden; });
+    box.append(row);
+  }
+  return box;
+}
+
+async function snoozeMessage(m, until) {
+  try { await api(`/api/messages/${m.id}/snooze`, { method: "POST", body: { until } }); }
+  catch (e) { toast(e.message); return; }
+  const card = document.querySelector(`.mail-card[data-id="${m.id}"]`);
+  const next = card?.nextElementSibling?.dataset?.id || card?.previousElementSibling?.dataset?.id;
+  card?.remove();
+  toast(`Snoozed until ${fmtWhen(until)}`, { label: "Undo", run: async () => {
+    try { await api(`/api/messages/${m.id}/snooze`, { method: "POST", body: { until: null } }); toast("Back in your inbox"); $("list-col").dataset.ready = ""; route(); }
+    catch (e) { toast(e.message); }
+  } });
+  refreshAll();
+  go(!isPhone() && next ? `#/m/${next}` : "#/");
 }
 
 // Archive (folder = null) or move to a folder. The card disappears, the next email opens,
@@ -705,14 +896,8 @@ async function moveMessage(m, folder, btn) {
   const card = document.querySelector(`.mail-card[data-id="${m.id}"]`);
   const next = card?.nextElementSibling?.dataset?.id || card?.previousElementSibling?.dataset?.id;
   card?.remove();
-  const undo = r.message_id && r.folder ? { label: "Undo", run: async () => {
-    try {
-      await api(`/api/accounts/${r.account_id}/restore`, { method: "POST", body: { folder: r.folder, message_id: r.message_id } });
-      toast("Back in your inbox");
-      setTimeout(() => { $("list-col").dataset.ready = ""; route(); }, 2500);
-    } catch (e) { toast(e.message); }
-  } } : null;
-  toast(folder ? `Moved to ${r.folder}` : "Archived", undo);
+  const n = (r.message_ids || []).length;
+  toast((folder ? `Moved to ${r.folder}` : "Archived") + (n > 1 ? ` (${n} emails)` : ""), undoMoves([r]));
   refreshStatus().then(() => { renderChrome(); renderSide(); });
   go(!isPhone() && next ? `#/m/${next}` : "#/");
 }
@@ -735,18 +920,7 @@ async function unsubscribe(m, btn) {
 async function archiveSender(addr) {
   let r;
   try { r = await api("/api/senders/archive", { method: "POST", body: { addr } }); } catch (e) { toast(e.message); return; }
-  const undo = r.moved.some((x) => x.folder && x.message_ids.length) ? { label: "Undo", run: async () => {
-    try {
-      for (const x of r.moved) {
-        if (x.folder && x.message_ids.length) {
-          await api(`/api/accounts/${x.account_id}/restore`, { method: "POST", body: { folder: x.folder, message_ids: x.message_ids } });
-        }
-      }
-      toast("Back in your inbox");
-      setTimeout(() => { $("list-col").dataset.ready = ""; route(); }, 2500);
-    } catch (e) { toast(e.message); }
-  } } : null;
-  toast(`${r.count} email${r.count === 1 ? "" : "s"} archived`, undo);
+  toast(`${r.count} email${r.count === 1 ? "" : "s"} archived`, undoMoves(r.moved));
   $("list-col").dataset.ready = "";
   go("#/");
 }
@@ -1574,6 +1748,25 @@ $("search").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && /\?\s*$/.test(e.target.value)) { e.preventDefault(); clearTimeout(searchTimer); runAsk(e.target.value.trim()); }
 });
 $("account-filter").addEventListener("change", (e) => { state.accountId = e.target.value; navigateList(); });
+
+// Keyboard: j/k next/previous, e archive, s snooze, r reply, x select, / search, Esc.
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest("input, textarea, select, [contenteditable]")) return;
+  const cards = [...document.querySelectorAll(".mail-card[data-id]")];
+  const i = cards.findIndex((c) => Number(c.dataset.id) === state.selectedId);
+  const reader = (label) => document.querySelector(`.reader [aria-label="${label}"]`);
+  const keys = {
+    j: () => { const c = cards[i + 1] || (i < 0 && cards[0]); if (c) { go(`#/m/${c.dataset.id}`); c.scrollIntoView({ block: "nearest" }); } },
+    k: () => { const c = cards[i - 1]; if (c) { go(`#/m/${c.dataset.id}`); c.scrollIntoView({ block: "nearest" }); } },
+    e: () => (state.selecting ? bulk("archive") : reader("Archive")?.click()),
+    s: () => reader("Snooze")?.click(),
+    r: () => document.querySelector(".composer textarea")?.focus(),
+    x: () => (state.selecting ? state.selectedId && togglePick(state.selectedId) : startSelect(state.selectedId)),
+    "/": () => $("search").focus(),
+    Escape: () => { document.querySelector(".snooze-pop")?.remove(); endSelect(); },
+  };
+  if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
+});
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 // New mail is synced within a second of arriving (IMAP IDLE) and the server tells this page

@@ -105,7 +105,27 @@ MIGRATIONS = [
     ("accounts", "sent_folder", "TEXT"),
     ("accounts", "sent_uidvalidity", "INTEGER"),
     ("accounts", "sent_last_uid", "INTEGER NOT NULL DEFAULT 0"),
+    # Conversations and snooze.
+    ("messages", "thread_key", "TEXT NOT NULL DEFAULT ''"),
+    ("messages", "snoozed_until", "TEXT"),   # hidden from the inbox until then (Beseder only)
+    ("messages", "resurfaced_at", "TEXT"),   # back from snooze: pinned on top until opened
 ]
+
+# Columns of tables created by LATE_SCHEMA.
+LATE_MIGRATIONS = [
+    ("sent_messages", "thread_key", "TEXT NOT NULL DEFAULT ''"),
+    ("thread_index", "thread_key", "TEXT NOT NULL DEFAULT ''"),
+]
+
+# Indexes on migrated columns.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_key, date);
+CREATE INDEX IF NOT EXISTS idx_messages_cat_date ON messages(category, date);
+CREATE INDEX IF NOT EXISTS idx_sent_thread ON sent_messages(thread_key);
+DROP INDEX IF EXISTS idx_messages_snoozed;
+-- Partial: only snoozed mail is in it, so the inbox query keeps walking the date index.
+CREATE INDEX IF NOT EXISTS idx_snoozed ON messages(snoozed_until) WHERE snoozed_until IS NOT NULL;
+"""
 
 # Created after the migrations (they use the columns above).
 LATE_SCHEMA = """
@@ -173,11 +193,10 @@ class DB:
         with self.conn() as c:
             c.execute("PRAGMA journal_mode=WAL")
             c.executescript(SCHEMA)
-            for table, column, definition in MIGRATIONS:
-                existing = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
-                if column not in existing:
-                    c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            self._migrate(c, MIGRATIONS)
             c.executescript(LATE_SCHEMA)
+            self._migrate(c, LATE_MIGRATIONS)
+            c.executescript(INDEXES)
             # One-time backfills for databases created before these tables existed.
             if not c.execute("SELECT 1 FROM settings WHERE key='fts_built'").fetchone():
                 c.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
@@ -185,6 +204,18 @@ class DB:
                           " SELECT message_id, COALESCE(in_reply_to, ''), COALESCE(refs, ''), date FROM messages"
                           " WHERE message_id IS NOT NULL AND message_id != ''")
                 c.execute("INSERT INTO settings(key, value) VALUES('fts_built', 'true')")
+            if not c.execute("SELECT 1 FROM settings WHERE key='threads_built'").fetchone():
+                from .mail.threads import backfill
+
+                backfill(c)
+                c.execute("INSERT INTO settings(key, value) VALUES('threads_built', 'true')")
+
+    @staticmethod
+    def _migrate(c, migrations) -> None:
+        for table, column, definition in migrations:
+            existing = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @contextmanager
     def conn(self):

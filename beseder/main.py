@@ -123,6 +123,17 @@ class BriefIn(BaseModel):
     tz: str = "UTC"
 
 
+class SnoozeIn(BaseModel):
+    until: str | None = None  # ISO date-time; None = back to the inbox now
+
+
+class BulkIn(BaseModel):
+    ids: list[int]
+    action: str  # archive | read | category | snooze | unsnooze
+    category: str = ""
+    until: str = ""
+
+
 class AskIn(BaseModel):
     question: str
     account_id: int | None = None
@@ -170,7 +181,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
-        tasks_ = [asyncio.create_task(core.scheduler()), asyncio.create_task(core.brief_loop())] \
+        tasks_ = [asyncio.create_task(core.scheduler()), asyncio.create_task(core.minute_loop())] \
             if config.run_scheduler else []
         if config.run_scheduler and config.idle:
             core.start_watchers(asyncio.get_running_loop())
@@ -244,13 +255,16 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             ]
             counts = {
                 (r["category"] or "untriaged"): r["n"]
-                for r in c.execute("SELECT category, COUNT(*) n FROM messages WHERE seen=0 GROUP BY category")
+                for r in c.execute("SELECT category, COUNT(*) n FROM messages WHERE seen=0 AND snoozed_until IS NULL"
+                                   " GROUP BY category")
             }
+            snoozed = c.execute("SELECT COUNT(*) FROM messages WHERE snoozed_until IS NOT NULL").fetchone()[0]
         cfg = core.ai_config()
         follow = core.followups()
         return {
             "accounts": accounts,
             "followups": {"to_reply": len(follow["to_reply"]), "waiting": len(follow["waiting"])},
+            "snoozed": snoozed,
             "unread_by_category": counts,
             "categories": tasks.CATEGORIES,
             "auto_triage": core.auto_triage,
@@ -269,19 +283,46 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     @app.get("/api/messages")
     def list_messages(
         category: str = "", account_id: int | None = None, unread: bool = False, q: str = "",
-        before: str = "", before_id: int = 0, limit: int = 50,
+        before: str = "", before_id: int = 0, limit: int = 50, snoozed: bool = False, threads: bool = True,
     ):
-        where, args = [], []
-        if category == "untriaged":
-            where.append("m.category IS NULL")
-        elif category:
-            where.append("m.category=?")
-            args.append(category)
-        if account_id:
-            where.append("m.account_id=?")
-            args.append(account_id)
-        if unread:
-            where.append("m.seen=0")
+        """One card per conversation (its latest message), newest first. Searches and the
+        Snoozed list show single messages. Mail back from snooze comes first on page one."""
+        def filters(t: str) -> tuple[list, list]:
+            w, a = [], []
+            if category == "untriaged":
+                w.append(f"{t}.category IS NULL")
+            elif category:
+                w.append(f"{t}.category=?")
+                a.append(category)
+            if account_id:
+                w.append(f"{t}.account_id=?")
+                a.append(account_id)
+            if unread:
+                w.append(f"{t}.seen=0")
+            w.append(f"{t}.snoozed_until IS {'NOT ' if snoozed else ''}NULL")
+            return w, a
+
+        def latest_of_thread(resurfaced: bool) -> tuple[str, list]:
+            # No newer message of the same conversation passes the same filters.
+            inner, inner_args = filters("n")
+            return ("NOT (m.thread_key!='' AND EXISTS (SELECT 1 FROM messages n WHERE n.thread_key=m.thread_key"
+                    " AND (n.date>m.date OR (n.date=m.date AND n.id>m.id))" + "".join(f" AND {x}" for x in inner)
+                    + f" AND n.resurfaced_at IS {'NOT ' if resurfaced else ''}NULL))"), inner_args
+
+        where, args = filters("m")
+        group = threads and not q and not snoozed
+        columns = LIST_COLUMNS
+        pinned_where, pinned_args = where + ["m.resurfaced_at IS NOT NULL"], list(args)
+        if group:
+            clause, extra = latest_of_thread(False)
+            where, args = where + [clause], args + extra
+            clause, extra = latest_of_thread(True)
+            pinned_where, pinned_args = pinned_where + [clause], pinned_args + extra
+            columns += (", (SELECT COUNT(*) FROM messages t WHERE t.thread_key=m.thread_key AND m.thread_key!='')"
+                        " AS thread_count, (SELECT COUNT(*) FROM messages t WHERE t.thread_key=m.thread_key"
+                        " AND m.thread_key!='' AND t.seen=0) AS thread_unread")
+        if not snoozed:
+            where.append("m.resurfaced_at IS NULL")
         match = fts_query(q) if q else None
         if match:
             where.append("m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
@@ -293,16 +334,22 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             # Keyset pagination on (date, id): messages sharing a date are neither skipped nor repeated.
             where.append("(m.date<? OR (m.date=? AND m.id<?))")
             args += [before, before, before_id or 2**62]
-        sql = f"SELECT {LIST_COLUMNS} FROM messages m JOIN accounts a ON a.id=m.account_id"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
+        sql = f"SELECT {columns}, m.snoozed_until FROM messages m JOIN accounts a ON a.id=m.account_id"
+        sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY m.date DESC, m.id DESC LIMIT ?"
         args.append(max(1, min(limit, 200)))
         with core.db.conn() as c:
             try:
-                return [dict(r) for r in c.execute(sql, args)]
+                rows = [dict(r) for r in c.execute(sql, args)]
             except sqlite3.OperationalError:
                 raise HTTPException(400, "Cannot search for this")
+            if not before and not q and not snoozed:
+                pinned = [dict(r, resurfaced=True) for r in c.execute(
+                    f"SELECT {columns}, m.snoozed_until FROM messages m JOIN accounts a ON a.id=m.account_id WHERE "
+                    + " AND ".join(pinned_where)
+                    + " ORDER BY m.resurfaced_at DESC LIMIT 50", pinned_args)]
+                rows = pinned + rows
+        return rows
 
     @app.post("/api/search/ask")
     async def ask_search(body: AskIn):
@@ -336,7 +383,47 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             m["attachments"] = [dict(r) for r in c.execute(
                 "SELECT idx, filename, content_type, size FROM attachments WHERE message_id=? ORDER BY idx",
                 (message_id,))]
+        m["thread"] = core.conversation(m)
         return m
+
+    @app.post("/api/messages/{message_id}/snooze")
+    def snooze(message_id: int, body: SnoozeIn):
+        get_message(message_id)
+        try:
+            core.snooze(core.thread_ids([message_id]), body.until)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        core.mark_changed()
+        return {"ok": True}
+
+    @app.post("/api/messages/bulk")
+    async def bulk(body: BulkIn):
+        """Acts on several conversations at once. Same writes as one by one, nothing more."""
+        if not body.ids or len(body.ids) > 500:
+            raise HTTPException(400, "Select between 1 and 500 emails")
+        ids = core.thread_ids(body.ids)
+        result: dict = {"count": len(ids)}
+        try:
+            if body.action == "archive":
+                result["moved"] = await core.archive_ids(ids)
+            elif body.action == "read":
+                with core.db.conn() as c:
+                    c.executemany("UPDATE messages SET seen=1, resurfaced_at=NULL WHERE id=?", [(i,) for i in ids])
+                for i in ids:
+                    spawn(core.mark_read(i))
+            elif body.action == "category":
+                for i in ids:
+                    core.set_category(i, body.category, False)
+            elif body.action in ("snooze", "unsnooze"):
+                core.snooze(ids, body.until if body.action == "snooze" else None)
+            else:
+                raise HTTPException(400, "Unknown action")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except (IMAPClientError, OSError, PermissionError) as e:
+            raise HTTPException(502, f"IMAP error: {e}")
+        core.mark_changed()
+        return result
 
     @app.get("/api/messages/{message_id}/attachments/{idx}")
     async def download_attachment(message_id: int, idx: int):
@@ -479,10 +566,15 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
 
     @app.post("/api/messages/{message_id}/read")
     async def mark_read(message_id: int):
+        """Opening a conversation reads all of it."""
         get_message(message_id)
+        ids = core.thread_ids([message_id])
         with core.db.conn() as c:
-            c.execute("UPDATE messages SET seen=1 WHERE id=?", (message_id,))
-        spawn(core.mark_read(message_id))
+            unread = [r[0] for r in c.execute(
+                f"SELECT id FROM messages WHERE seen=0 AND id IN ({','.join('?' * len(ids))})", ids)]
+            c.executemany("UPDATE messages SET seen=1, resurfaced_at=NULL WHERE id=?", [(i,) for i in ids])
+        for i in unread:
+            spawn(core.mark_read(i))
         return {"ok": True}
 
     @app.post("/api/messages/{message_id}/category")

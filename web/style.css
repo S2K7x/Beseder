@@ -181,6 +181,37 @@ body[data-view="settings"] .side-col { display: none; }
 .reply-hint { display: flex; align-items: center; justify-content: center; gap: 6px; padding-top: 12px; }
 .reply-hint svg.icon { width: 15px; height: 15px; }
 
+/* --- conversations, snooze, multi-select ----------------------------------------------- */
+.thread { border-bottom: 1px solid var(--line); padding: 14px 0 10px; display: flex; flex-direction: column; gap: 6px; }
+.thread-head { margin: 0 4px 4px; }
+.thread-item { border-radius: var(--r-tile); background: var(--soft); }
+.thread-item.mine { background: transparent; border: 1px solid var(--line); }
+.thread-line { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: 0; background: none;
+  cursor: pointer; text-align: left; }
+.thread-line .grow { flex: 1; min-width: 0; }
+.thread-line .t { display: block; font-weight: 600; font-size: 14px; }
+.thread-line .s { display: block; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-item pre.text { margin: 0; padding: 4px 16px 12px 56px; }
+.thread-item .link { margin: 0 0 12px 56px; }
+.mail-card .pick { width: 44px; height: 44px; border-radius: 50%; border: 2px solid var(--line); display: grid; place-items: center;
+  color: transparent; flex: none; }
+.mail-card.picked .pick { background: var(--ink); border-color: var(--ink); color: var(--ink-text); }
+.mail-card.picked { box-shadow: 0 0 0 2px var(--ink), var(--shadow); }
+.bulkbar { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 30; display: flex; align-items: center;
+  gap: 8px; padding: 8px 10px 8px 18px; background: var(--card); border-radius: 999px; box-shadow: 0 12px 40px rgba(0,0,0,.18);
+  max-width: calc(100vw - 24px); overflow-x: auto; }
+.bulkbar .n { font-weight: 600; font-size: 14px; white-space: nowrap; margin-right: 4px; }
+.bulkbar .round:disabled { opacity: .4; }
+.bulkbar .select-pill { height: 40px; flex: none; }
+.snooze-pop { position: fixed; z-index: 40; width: 280px; padding: 12px; display: flex; flex-direction: column; gap: 2px; }
+.snooze-opt { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px; border: 0;
+  background: none; border-radius: 14px; cursor: pointer; text-align: left; }
+.snooze-opt:hover { background: var(--soft); }
+.snooze-custom { display: flex; gap: 8px; margin-top: 8px; }
+.snooze-custom input { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 6px 8px; background: var(--soft); }
+.tag svg.icon { width: 12px; height: 12px; }
+.chip svg.icon { width: 15px; height: 15px; }
+
 .avatar {
   width: 44px; height: 44px; border-radius: 50%; flex: none; display: grid; place-items: center;
   font-weight: 650; font-size: 15px; letter-spacing: .02em; position: relative;
@@ -419,6 +450,7 @@ body[data-view="welcome"] .settings-col { display: block; }
   .features, .choice-grid, .choice-grid.four { grid-template-columns: minmax(0, 1fr); }
   .choice-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   body[data-view="welcome"] .main { padding-bottom: 24px; }
+  .bulkbar { bottom: calc(96px + env(safe-area-inset-bottom)); }
   .tabbar {
     position: fixed; left: 16px; right: 16px; bottom: calc(12px + env(safe-area-inset-bottom)); z-index: 30;
     display: flex; justify-content: space-around; padding: 8px; border-radius: 999px;

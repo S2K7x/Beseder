@@ -22,6 +22,7 @@ from ..crypto import Vault
 from ..db import DB, now_iso
 from .oauth_ms import MicrosoftOAuth
 from .parse import extract_attachment, parse_message, strip_quoted
+from .threads import thread_key
 
 log = logging.getLogger(__name__)
 
@@ -191,20 +192,24 @@ class MailService:
                      p.unsub_url, p.unsub_mailto, int(p.unsub_one_click),
                      int(b"\\Answered" in data.get(b"FLAGS", ())))
                 )
-                if p.message_id:
-                    threads.append((p.message_id, p.in_reply_to, p.refs, p.date))
+                threads.append((p.message_id, p.in_reply_to, p.refs, p.date, p.subject, p.from_addr))
                 if p.attachments:
                     attachments[uid] = p.attachments
             with self.db.conn() as c:
+                # One at a time: a reply in this batch joins the thread of a message just before it.
+                for i, (mid, irt, refs, when, subject, addr) in enumerate(threads):
+                    key = thread_key(c, mid, irt, refs, subject, addr)
+                    rows[i] += (key,)
+                    if mid:
+                        c.execute("INSERT OR IGNORE INTO thread_index(message_id, in_reply_to, refs, date, thread_key)"
+                                  " VALUES(?,?,?,?,?)", (mid, irt, refs, when, key))
                 c.executemany(
                     "INSERT OR IGNORE INTO messages(account_id, uid, message_id, in_reply_to, refs, subject,"
                     " from_name, from_addr, reply_to, to_addrs, cc_addrs, date, snippet, body_text, body_html,"
-                    " list_unsubscribe, truncated, seen, notified, unsub_url, unsub_mailto, unsub_one_click, answered)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " list_unsubscribe, truncated, seen, notified, unsub_url, unsub_mailto, unsub_one_click, answered,"
+                    " thread_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
-                c.executemany("INSERT OR IGNORE INTO thread_index(message_id, in_reply_to, refs, date)"
-                              " VALUES(?,?,?,?)", threads)
                 for uid, items in attachments.items():
                     mid = c.execute("SELECT id FROM messages WHERE account_id=? AND uid=?",
                                     (account["id"], uid)).fetchone()[0]
@@ -311,9 +316,12 @@ class MailService:
                 rows.append((account["id"], uid, p.message_id, p.in_reply_to, p.refs, p.first_to[1],
                              p.first_to[0], p.subject, p.date, own, int(bool(ASKS.search(own)))))
             with self.db.conn() as c:
-                c.executemany(
-                    "INSERT OR IGNORE INTO sent_messages(account_id, uid, message_id, in_reply_to, refs, to_addr,"
-                    " to_name, subject, date, body_text, expects_reply) VALUES(?,?,?,?,?,?,?,?,?,?,?)", rows)
+                for row in rows:
+                    key = thread_key(c, row[2], row[3], row[4], row[7], row[5])
+                    c.execute(
+                        "INSERT OR IGNORE INTO sent_messages(account_id, uid, message_id, in_reply_to, refs, to_addr,"
+                        " to_name, subject, date, body_text, expects_reply, thread_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (*row, key))
                 c.execute("UPDATE accounts SET sent_uidvalidity=?, sent_last_uid=MAX(sent_last_uid, ?) WHERE id=?",
                           (uidvalidity, chunk[-1], account["id"]))
             new += len(rows)
@@ -417,10 +425,17 @@ class MailService:
         return {"archive": self._archive_folder(folders), "folders": targets}
 
     def move(self, message_id: int, target: str | None) -> dict:
-        """Moves a message out of the inbox (target=None means the archive). Never to the trash."""
+        """Moves a conversation out of the inbox (target=None means the archive): the message
+        and the rest of its thread in the same mailbox. Never to the trash."""
         m = self._message(message_id)
-        r = self.move_many(m["account_id"], [message_id], target)
-        return {"folder": r["folder"], "account_id": r["account_id"], "message_id": m["message_id"] or ""}
+        ids = [message_id]
+        if m["thread_key"]:
+            with self.db.conn() as c:
+                ids += [r[0] for r in c.execute("SELECT id FROM messages WHERE account_id=? AND thread_key=? AND id!=?",
+                                                (m["account_id"], m["thread_key"], message_id))]
+        r = self.move_many(m["account_id"], ids, target)
+        return {"folder": r["folder"], "account_id": r["account_id"], "message_id": m["message_id"] or "",
+                "message_ids": r["message_ids"]}
 
     def move_many(self, account_id: int, message_ids: list[int], target: str | None) -> dict:
         """Moves messages of one account out of the inbox, in one connection. Never to the trash.
