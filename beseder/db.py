@@ -1,4 +1,4 @@
-"""Stockage SQLite. Une connexion par appel : simple et sûr avec les threads de sync."""
+"""SQLite storage. One connection per call: simple and safe with the sync threads."""
 
 import json
 import sqlite3
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     host TEXT NOT NULL,
     port INTEGER NOT NULL,
     username TEXT NOT NULL,
-    secret BLOB NOT NULL,            -- chiffré (mot de passe ou refresh token)
+    secret BLOB NOT NULL,            -- encrypted (password or refresh token)
     uidvalidity INTEGER,
     last_uid INTEGER NOT NULL DEFAULT 0,
     last_sync TEXT,
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_cat ON messages(category);
 
--- Règles par expéditeur créées quand l'utilisateur recatégorise un mail.
+-- Per-sender rules, created when the user re-categorizes a message.
 CREATE TABLE IF NOT EXISTS sender_rules (
     addr TEXT PRIMARY KEY,
     category TEXT NOT NULL,
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
--- Journal des actions IA / écritures IMAP. Jamais de contenu de mail ici.
+-- Log of AI actions and IMAP writes. Never any message content here.
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,

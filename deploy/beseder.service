@@ -1,6 +1,6 @@
-# À copier dans /etc/systemd/system/beseder.service (adapte User et les chemins).
+# Copy to /etc/systemd/system/beseder.service (adjust User= and the paths).
 [Unit]
-Description=Beseder - client mail
+Description=Beseder mail client
 After=network-online.target
 Wants=network-online.target
 

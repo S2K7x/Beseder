@@ -1,1 +1,1 @@
-"""Beseder : client mail unifié avec tri, résumé et brouillons par IA."""
+"""Beseder: a unified mail client with AI triage, summaries and drafts."""

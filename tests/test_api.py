@@ -24,21 +24,21 @@ def test_security_headers_and_pwa(client):
 
 def test_list_filters_and_category_rules(client, core):
     acc = add_account(core)
-    m1 = add_message(core, acc, 1, from_addr="news@shop.com", subject="Soldes")
-    m2 = add_message(core, acc, 2, from_addr="news@shop.com", subject="Encore des soldes")
+    m1 = add_message(core, acc, 1, from_addr="news@shop.com", subject="Sale")
+    m2 = add_message(core, acc, 2, from_addr="news@shop.com", subject="More sales")
     add_message(core, acc, 3, seen=1)
 
     assert len(client.get("/api/messages").json()) == 3
     assert len(client.get("/api/messages", params={"unread": True}).json()) == 2
-    assert [m["id"] for m in client.get("/api/messages", params={"q": "Encore"}).json()] == [m2]
+    assert [m["id"] for m in client.get("/api/messages", params={"q": "More"}).json()] == [m2]
 
     r = client.post(f"/api/messages/{m1}/category", json={"category": "promotions", "remember_sender": True})
     assert r.status_code == 200
     assert client.get(f"/api/messages/{m2}").json()["category"] == "promotions"
     assert client.get("/api/rules").json()[0]["addr"] == "news@shop.com"
-    assert client.post(f"/api/messages/{m1}/category", json={"category": "poubelle"}).status_code == 400
+    assert client.post(f"/api/messages/{m1}/category", json={"category": "trash"}).status_code == 400
 
-    # Un nouveau mail du même expéditeur est classé par la règle, sans IA.
+    # A new message from the same sender is filed by the rule, without AI.
     m4 = add_message(core, acc, 4, from_addr="news@shop.com")
     core.apply_sender_rules()
     assert client.get(f"/api/messages/{m4}").json()["category_source"] == "rule"
@@ -48,23 +48,26 @@ def test_list_filters_and_category_rules(client, core):
 
 def test_summary_endpoint_validates_ids(client, core, monkeypatch):
     acc = add_account(core)
-    m1 = add_message(core, acc, 1, subject="RDV demain")
+    m1 = add_message(core, acc, 1, subject="Meeting tomorrow")
     add_message(core, acc, 2, seen=1)
     fake = FakeProvider(
-        f'{{"apercu": "Un RDV.", "mails": [{{"id": "{m1}", "resume": "RDV", "priorite": "haute"}}, {{"id": "12345"}}]}}'
+        f'{{"overview": "A meeting.", "emails": [{{"id": "{m1}", "summary": "Meeting", "priority": "high"}}, {{"id": "12345"}}]}}'
     )
     monkeypatch.setattr(core, "provider", lambda: fake)
     r = client.post("/api/summary", json={}).json()
     assert r["count"] == 1
-    assert r["items"] == [{"id": m1, "summary": "RDV", "priority": "haute", "subject": "RDV demain", "from_name": "Alice"}]
-    assert "RDV demain" in fake.calls[0]["user"]
+    assert r["items"] == [{"id": m1, "summary": "Meeting", "priority": "high", "subject": "Meeting tomorrow",
+                           "from_name": "Alice", "date": "2026-10-11T10:00:00+00:00",
+                           "from_addr": "alice@example.com"}]
+    assert "Meeting tomorrow" in fake.calls[0]["user"]
+    assert client.get("/api/summary/last").json()["overview"] == "A meeting."
 
 
 def test_ai_not_configured_gives_clear_error(client, core):
     acc = add_account(core)
     add_message(core, acc, 1)
     r = client.post("/api/summary", json={})
-    assert r.status_code == 502 and "Configure" in r.json()["detail"]
+    assert r.status_code == 502 and "Settings" in r.json()["detail"]
 
 
 def test_auto_triage_toggle(client, core, monkeypatch):
@@ -72,7 +75,7 @@ def test_auto_triage_toggle(client, core, monkeypatch):
     m1 = add_message(core, acc, 1)
     fake = FakeProvider(f'{{"{m1}": "important"}}')
     monkeypatch.setattr(core, "provider", lambda: fake)
-    assert client.post("/api/triage/run").status_code == 400  # désactivé par défaut
+    assert client.post("/api/triage/run").status_code == 400  # off by default
     client.put("/api/settings/triage", json={"auto": True})
     assert client.get("/api/status").json()["auto_triage"] is True
     client.post("/api/triage/run")
@@ -82,10 +85,10 @@ def test_auto_triage_toggle(client, core, monkeypatch):
 def test_draft_endpoint(client, core, monkeypatch):
     acc = add_account(core)
     m1 = add_message(core, acc, 1)
-    monkeypatch.setattr(core, "provider", lambda: FakeProvider("Bonjour Alice,\n\nMerci !"))
-    r = client.post(f"/api/messages/{m1}/draft", json={"instructions": "remercie"}).json()
-    assert r["body"].startswith("Bonjour Alice")
-    assert r["to"] == "Alice <alice@exemple.com>"
+    monkeypatch.setattr(core, "provider", lambda: FakeProvider("Hi Alice,\n\nThanks!"))
+    r = client.post(f"/api/messages/{m1}/draft", json={"instructions": "say thanks"}).json()
+    assert r["body"].startswith("Hi Alice")
+    assert r["to"] == "Alice <alice@example.com>"
 
 
 def test_ai_settings_keep_key_secret(client, core):
@@ -95,7 +98,7 @@ def test_ai_settings_keep_key_secret(client, core):
     assert got["has_key"] is True and "sk-secret" not in str(got)
     assert got["base_url"] == "https://openrouter.ai/api/v1"
     assert core.ai_config().api_key == "sk-secret"
-    # Réenregistrer sans clé garde l'ancienne.
+    # Saving again without a key keeps the stored one.
     client.put("/api/settings/ai", json={"preset": "openrouter", "model": "autre"})
     assert core.ai_config().api_key == "sk-secret"
     assert client.put("/api/settings/ai", json={"preset": "nope"}).status_code == 400
@@ -104,3 +107,9 @@ def test_ai_settings_keep_key_secret(client, core):
 def test_account_kind_validation(client):
     r = client.post("/api/accounts", json={"kind": "outlook", "email": "a@b.c", "password": "x"})
     assert r.status_code == 400
+
+
+def test_profile_and_summary_language(client):
+    client.put("/api/settings/profile", json={"name": "Sam", "summary_language": "French"})
+    got = client.get("/api/settings/ai").json()
+    assert got["my_name"] == "Sam" and got["summary_language"] == "French"

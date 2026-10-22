@@ -7,10 +7,10 @@ from .conftest import add_account
 
 def raw(uid, subject="Hello"):
     m = EmailMessage()
-    m["From"] = "Bob <bob@exemple.com>"
+    m["From"] = "Bob <bob@example.com>"
     m["Subject"] = subject
     m["Date"] = "Tue, 20 Oct 2026 09:30:00 +0000"
-    m["Message-ID"] = f"<{uid}@exemple.com>"
+    m["Message-ID"] = f"<{uid}@example.com>"
     m.set_content(f"message {uid}")
     return m.as_bytes()
 
@@ -29,14 +29,14 @@ class FakeIMAP:
         return False
 
     def select_folder(self, name, readonly=False):
-        assert readonly, "la sync doit ouvrir INBOX en lecture seule"
+        assert readonly, "sync must open INBOX read-only"
         return {b"UIDVALIDITY": self.uidvalidity}
 
     def search(self, criteria):
         if criteria[0] == "UID":
             start = int(criteria[1].split(":")[0])
             found = [u for u in self.messages if u >= start]
-            return found or [max(self.messages)]  # comportement IMAP réel sur une plage vide
+            return found or [max(self.messages)]  # real IMAP behavior on an empty range
         return list(self.messages)
 
     def fetch(self, uids, items):
@@ -52,21 +52,21 @@ class FakeIMAP:
             out[u] = d
         return out
 
-    def __getattr__(self, name):  # toute autre commande (delete, expunge, move...) est interdite
-        raise AssertionError(f"commande IMAP inattendue : {name}")
+    def __getattr__(self, name):  # any other command (delete, expunge, move...) is forbidden
+        raise AssertionError(f"unexpected IMAP command: {name}")
 
 
 def test_sync_imports_refreshes_flags_and_handles_deletions(core, monkeypatch):
     acc = add_account(core)
-    server = FakeIMAP({10: raw(10), 11: raw(11, "Facture")})
+    server = FakeIMAP({10: raw(10), 11: raw(11, "Invoice")})
     monkeypatch.setattr(core.mail, "connect", lambda account: server)
 
     assert core.mail.sync_account(acc) == 2
-    assert core.mail.sync_account(acc) == 0  # rien de nouveau, pas de doublon
+    assert core.mail.sync_account(acc) == 0  # nothing new, no duplicates
 
     server.messages[12] = raw(12)
     server.seen.add(10)
-    del server.messages[11]  # supprimé depuis l'iPhone
+    del server.messages[11]  # deleted from the phone
     assert core.mail.sync_account(acc) == 1
     with core.db.conn() as c:
         rows = {r["uid"]: r["seen"] for r in c.execute("SELECT uid, seen FROM messages")}
@@ -91,21 +91,21 @@ def test_sync_error_is_stored(core, monkeypatch):
     acc = add_account(core)
 
     def boom(account):
-        raise OSError("réseau coupé")
+        raise OSError("network down")
 
     monkeypatch.setattr(core.mail, "connect", boom)
     assert core.mail.sync_account(acc) == 0
-    assert core.mail.get_account(acc)["last_error"] == "réseau coupé"
+    assert core.mail.get_account(acc)["last_error"] == "network down"
 
 
 def test_build_reply_threads_correctly():
     m = {
-        "subject": "Dîner", "reply_to": "", "from_name": "Bob", "from_addr": "bob@exemple.com",
-        "message_id": "<1@exemple.com>", "refs": "<0@exemple.com>",
+        "subject": "Dinner", "reply_to": "", "from_name": "Bob", "from_addr": "bob@example.com",
+        "message_id": "<1@example.com>", "refs": "<0@example.com>",
     }
-    msg = build_reply(m, "moi@gmail.com", "Avec plaisir")
-    assert msg["Subject"] == "Re: Dîner"
-    assert msg["To"] == "Bob <bob@exemple.com>"
-    assert msg["In-Reply-To"] == "<1@exemple.com>"
-    assert msg["References"] == "<0@exemple.com> <1@exemple.com>"
-    assert build_reply(dict(m, subject="RE: Dîner"), "moi@gmail.com", "x")["Subject"] == "RE: Dîner"
+    msg = build_reply(m, "me@gmail.com", "With pleasure")
+    assert msg["Subject"] == "Re: Dinner"
+    assert msg["To"] == "Bob <bob@example.com>"
+    assert msg["In-Reply-To"] == "<1@example.com>"
+    assert msg["References"] == "<0@example.com> <1@example.com>"
+    assert build_reply(dict(m, subject="RE: Dinner"), "me@gmail.com", "x")["Subject"] == "RE: Dinner"

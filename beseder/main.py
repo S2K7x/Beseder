@@ -1,4 +1,4 @@
-"""API HTTP + service de la PWA."""
+"""HTTP API + PWA serving."""
 
 import asyncio
 import contextlib
@@ -29,7 +29,7 @@ CSP = (
 )
 
 
-# --- modèles d'entrée ---------------------------------------------------------
+# --- request models -----------------------------------------------------------
 class AccountIn(BaseModel):
     kind: str
     name: str = ""
@@ -84,6 +84,7 @@ class AIIn(BaseModel):
 
 class ProfileIn(BaseModel):
     name: str = ""
+    summary_language: str = "English"
 
 
 def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None) -> FastAPI:
@@ -109,10 +110,10 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
 
     @app.middleware("http")
     async def security(request: Request, call_next):
-        # Anti-CSRF : un site tiers ne peut pas ajouter d'en-tête personnalisé sans preflight CORS.
+        # Anti-CSRF: a third-party site cannot add a custom header without a CORS preflight.
         if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
             if request.headers.get("x-beseder") != "1":
-                return JSONResponse({"detail": "En-tête X-Beseder manquant"}, status_code=403)
+                return JSONResponse({"detail": "Missing X-Beseder header"}, status_code=403)
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = CSP
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -124,7 +125,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     def ai_error(e: AIError):
         raise HTTPException(502, str(e))
 
-    # --- statut -----------------------------------------------------------
+    # --- status -----------------------------------------------------------
     @app.get("/api/status")
     def status():
         with core.db.conn() as c:
@@ -137,7 +138,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
                 )
             ]
             counts = {
-                (r["category"] or "non_trie"): r["n"]
+                (r["category"] or "untriaged"): r["n"]
                 for r in c.execute("SELECT category, COUNT(*) n FROM messages WHERE seen=0 GROUP BY category")
             }
         cfg = core.ai_config()
@@ -150,6 +151,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             "ai_label": PRESETS.get(cfg.preset, {}).get("label", ""),
             "syncing": core.status["syncing"],
             "triage_error": core.status["triage_error"],
+            "my_name": core.db.get_setting("my_name", ""),
         }
 
     # --- messages ---------------------------------------------------------
@@ -159,7 +161,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         before: str = "", limit: int = 50,
     ):
         where, args = [], []
-        if category == "non_trie":
+        if category == "untriaged":
             where.append("m.category IS NULL")
         elif category:
             where.append("m.category=?")
@@ -194,7 +196,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
                 (message_id,),
             ).fetchone()
         if row is None:
-            raise HTTPException(404, "Message introuvable")
+            raise HTTPException(404, "Message not found")
         return dict(row)
 
     @app.get("/api/messages/{message_id}")
@@ -235,16 +237,16 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     async def save_draft(message_id: int, body: DraftSaveIn):
         get_message(message_id)
         if not body.body.strip():
-            raise HTTPException(400, "Brouillon vide")
+            raise HTTPException(400, "The draft is empty")
         try:
             folder = await asyncio.to_thread(core.mail.save_draft, message_id, body.body)
         except LookupError as e:
             raise HTTPException(404, str(e))
         except (IMAPClientError, OSError, PermissionError) as e:
-            raise HTTPException(502, f"Échec IMAP : {e}")
+            raise HTTPException(502, f"IMAP error: {e}")
         return {"ok": True, "folder": folder}
 
-    # --- IA : résumé et tri ----------------------------------------------
+    # --- AI: summary and triage ------------------------------------------
     @app.post("/api/summary")
     async def summary(body: SummaryIn):
         sql = "SELECT * FROM messages WHERE seen=0"
@@ -257,17 +259,23 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         with core.db.conn() as c:
             rows = [dict(r) for r in c.execute(sql, args)]
         try:
-            result = await tasks.summarize(core.provider() if rows else None, rows)
+            language = core.db.get_setting("summary_language", "English") or "English"
+            result = await tasks.summarize(core.provider() if rows else None, rows, language)
         except AIError as e:
             ai_error(e)
         meta = {r["id"]: r for r in rows}
         for it in result["items"]:
             r = meta[it["id"]]
-            it.update(subject=r["subject"], from_name=r["from_name"] or r["from_addr"])
-        core.db.audit("ai_summary", f"{len(rows)} mails")
+            it.update(subject=r["subject"], from_name=r["from_name"] or r["from_addr"], date=r["date"], from_addr=r["from_addr"])
+        core.db.audit("ai_summary", f"{len(rows)} messages")
         result["count"] = len(rows)
         result["generated_at"] = now_iso()
+        core.db.set_setting("last_summary", result)
         return result
+
+    @app.get("/api/summary/last")
+    def last_summary():
+        return core.db.get_setting("last_summary")
 
     @app.put("/api/settings/triage")
     async def set_triage(body: TriageIn):
@@ -279,7 +287,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     @app.post("/api/triage/run")
     async def run_triage():
         if not core.auto_triage:
-            raise HTTPException(400, "Le tri automatique est désactivé")
+            raise HTTPException(400, "Auto-triage is off")
         n = await core.run_triage()
         if core.status["triage_error"]:
             raise HTTPException(502, core.status["triage_error"])
@@ -296,7 +304,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             c.execute("DELETE FROM sender_rules WHERE addr=?", (addr,))
         return {"ok": True}
 
-    # --- réglages IA ------------------------------------------------------
+    # --- AI settings ------------------------------------------------------
     @app.get("/api/settings/ai")
     def get_ai():
         cfg = core.ai_config()
@@ -309,6 +317,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             "command": cfg.command,
             "has_key": bool(cfg.api_key),
             "my_name": core.db.get_setting("my_name", ""),
+            "summary_language": core.db.get_setting("summary_language", "English"),
         }
 
     @app.put("/api/settings/ai")
@@ -322,13 +331,14 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     @app.put("/api/settings/profile")
     def put_profile(body: ProfileIn):
         core.db.set_setting("my_name", body.name.strip()[:100])
+        core.db.set_setting("summary_language", body.summary_language.strip()[:40] or "English")
         return {"ok": True}
 
     @app.post("/api/settings/ai/test")
     async def test_ai():
         try:
             text = await core.provider().complete(
-                "Tu réponds en un seul mot.", "Réponds exactement : OK", fast=True, max_tokens=20
+                "You answer with a single word.", "Reply exactly: OK", fast=True, max_tokens=20
             )
         except AIError as e:
             ai_error(e)
@@ -336,11 +346,11 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
 
     @app.post("/api/settings/ai/models")
     async def list_models(body: AIIn):
-        """Liste les modèles avec les valeurs du formulaire (avant d'enregistrer)."""
+        """Lists models using the form values (before saving)."""
         cfg = core.ai_config()
         preset = PRESETS.get(body.preset)
         if not preset:
-            raise HTTPException(400, "Fournisseur inconnu")
+            raise HTTPException(400, "Unknown provider")
         cfg.kind = preset["kind"]
         cfg.base_url = body.base_url or preset["base_url"]
         cfg.command = body.command or "claude"
@@ -351,9 +361,9 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         try:
             return {"models": await make_provider(cfg).list_models()}
         except Exception as e:
-            raise HTTPException(502, f"Impossible de lister les modèles : {e}")
+            raise HTTPException(502, f"Cannot list models: {e}")
 
-    # --- comptes ----------------------------------------------------------
+    # --- accounts ---------------------------------------------------------
     @app.get("/api/accounts")
     def accounts():
         with core.db.conn() as c:
@@ -376,20 +386,20 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     @app.post("/api/accounts")
     async def add_account(body: AccountIn):
         if body.kind not in ("gmail", "icloud", "imap"):
-            raise HTTPException(400, "Type de compte inconnu (Outlook passe par la connexion Microsoft)")
+            raise HTTPException(400, "Unknown account type (Outlook uses the Microsoft sign-in)")
         preset = MAIL_PRESETS.get(body.kind, {})
         host = preset.get("host") or body.host.strip()
         port = preset.get("port") or body.port
         username = body.username.strip() or body.email.strip()
         password = body.password.replace(" ", "") if body.kind == "gmail" else body.password
         if not host:
-            raise HTTPException(400, "Serveur IMAP requis")
+            raise HTTPException(400, "IMAP server required")
         try:
             await asyncio.to_thread(MailService.test_login, host, port, username, password)
         except LoginError:
-            raise HTTPException(400, "Identifiants refusés. Utilise un mot de passe d'application.")
+            raise HTTPException(400, "Login rejected. Use an app password.")
         except (IMAPClientError, OSError) as e:
-            raise HTTPException(400, f"Connexion impossible : {e}")
+            raise HTTPException(400, f"Cannot connect: {e}")
         account_id = insert_account(body.kind, body.name, body.email.strip(), host, port, username, {"password": password})
         spawn(core.sync_all())
         return {"id": account_id}
@@ -400,7 +410,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         try:
             return core.mail.oauth.start(body.client_id.strip(), body.tenant or "common", body.email.strip(), body.name)
         except Exception as e:
-            raise HTTPException(400, f"Microsoft a refusé : {e}")
+            raise HTTPException(400, f"Microsoft refused: {e}")
 
     @app.post("/api/accounts/outlook/poll")
     async def outlook_poll(body: FlowIn):
@@ -421,7 +431,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
 
     @app.delete("/api/accounts/{account_id}")
     def delete_account(account_id: int):
-        """Retire le compte de Beseder (données locales seulement, rien n'est supprimé sur le serveur)."""
+        """Removes the account from Beseder (local data only, nothing is deleted on the server)."""
         with core.db.conn() as c:
             c.execute("DELETE FROM accounts WHERE id=?", (account_id,))
         return {"ok": True}

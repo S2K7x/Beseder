@@ -1,11 +1,11 @@
-"""Providers IA interchangeables.
+"""Pluggable AI providers.
 
-Tous exposent la même chose : `complete(system, user, fast)` -> texte.
-Aucun ne donne d'outil à l'IA (voir CLAUDE.md).
+They all expose the same thing: `complete(system, user, fast)` -> text.
+None of them gives the AI any tool (see CLAUDE.md).
 
-- openai_compat : OpenRouter, Google AI Studio, Ollama, LM Studio, Groq, Mistral...
-- anthropic     : API Claude (clé API)
-- claude_cli    : le `claude` installé sur le Pi (ton abonnement), sans outils ni MCP
+- openai_compat: OpenRouter, Google AI Studio, Ollama, LM Studio, Groq, Mistral...
+- anthropic:     Claude API (API key)
+- claude_cli:    the `claude` installed on the Pi (your subscription), no tools, no MCP
 """
 
 import asyncio
@@ -22,24 +22,24 @@ PRESETS = {
         "label": "OpenRouter",
         "base_url": "https://openrouter.ai/api/v1",
         "needs_key": True,
-        "note": "Les modèles « :free » sont gratuits mais certains fournisseurs peuvent conserver "
-        "ou utiliser tes prompts (donc tes mails). Vérifie la politique du modèle choisi.",
+        "note": "\":free\" models cost nothing, but some of their providers may keep or use your "
+        "prompts (so your emails). Check the policy of the model you pick.",
     },
     "google": {
         "kind": "openai_compat",
         "label": "Google AI Studio (Gemini)",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "needs_key": True,
-        "note": "Avec l'offre gratuite, Google peut utiliser tes prompts (donc tes mails) pour "
-        "améliorer ses produits. L'offre payante ne le fait pas.",
+        "note": "On the free tier, Google may use your prompts (so your emails) to improve its "
+        "products. The paid tier does not.",
     },
     "ollama": {
         "kind": "openai_compat",
         "label": "Ollama (local)",
         "base_url": "http://localhost:11434/v1",
         "needs_key": False,
-        "note": "Tout reste chez toi. Un Pi est lent pour les gros modèles : vise un petit modèle "
-        "ou un Ollama sur une autre machine de ton tailnet.",
+        "note": "Everything stays at home. A Pi is slow with large models: pick a small one, "
+        "or point to an Ollama running on another machine of your tailnet.",
     },
     "anthropic": {
         "kind": "anthropic",
@@ -48,27 +48,27 @@ PRESETS = {
         "needs_key": True,
         "model": "claude-opus-5-5",
         "model_fast": "claude-haiku-5-5",
-        "note": "Payant à l'usage. Haiku pour le tri (peu cher), Opus pour résumés et brouillons.",
+        "note": "Pay as you go. Haiku for triage (cheap), Opus for summaries and drafts.",
     },
     "claude_cli": {
         "kind": "claude_cli",
-        "label": "Claude Code sur le Pi",
+        "label": "Claude Code on the Pi",
         "base_url": "",
         "needs_key": False,
         "model": "",
         "model_fast": "haiku",
-        "note": "Utilise le `claude` déjà connecté sur le Pi. Lancé sans outils et sans serveurs MCP.",
+        "note": "Uses the `claude` already signed in on the Pi. Runs with no tools and no MCP servers.",
     },
     "custom": {
         "kind": "openai_compat",
-        "label": "Autre (compatible OpenAI)",
+        "label": "Other (OpenAI-compatible)",
         "base_url": "",
         "needs_key": False,
         "note": "",
     },
 }
 
-# Modèles Claude qui acceptent `fallbacks: "default"` (refus de sécurité -> autre modèle).
+# Claude models that accept `fallbacks: "default"` (safety decline -> another model).
 _FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"}
 
 
@@ -124,16 +124,16 @@ class OpenAICompatProvider(Provider):
             },
         )
         if r.status_code != 200:
-            raise AIError(f"{r.status_code} : {r.text[:300]}")
+            raise AIError(f"{r.status_code}: {r.text[:300]}")
         try:
             return r.json()["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError, ValueError):
-            raise AIError("Réponse inattendue du fournisseur")
+            raise AIError("Unexpected response from the provider")
 
     async def list_models(self):
         r = await self.http.get(f"{self.base}/models")
         if r.status_code != 200:
-            raise AIError(f"{r.status_code} : {r.text[:300]}")
+            raise AIError(f"{r.status_code}: {r.text[:300]}")
         data = r.json().get("data", [])
         return sorted(m["id"].removeprefix("models/") for m in data if m.get("id"))
 
@@ -154,31 +154,31 @@ class AnthropicProvider(Provider):
                 max_tokens=max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": user}],
-                # Tri : rapide et pas cher. Résumés / brouillons : un peu plus de réflexion.
+                # Triage: fast and cheap. Summaries and drafts: a bit more thinking.
                 output_config={"effort": "low" if fast else "medium"},
                 **kwargs,
             )
         except anthropic.AuthenticationError:
-            raise AIError("Clé API Anthropic refusée")
+            raise AIError("Anthropic API key rejected")
         except anthropic.RateLimitError:
-            raise AIError("Limite de débit Anthropic atteinte, réessaie plus tard")
+            raise AIError("Anthropic rate limit reached, try again later")
         except anthropic.APIStatusError as e:
-            raise AIError(f"Erreur API Anthropic {e.status_code}")
+            raise AIError(f"Anthropic API error {e.status_code}")
         except anthropic.APIConnectionError:
-            raise AIError("Impossible de joindre l'API Anthropic")
+            raise AIError("Cannot reach the Anthropic API")
         if resp.stop_reason == "refusal":
-            raise AIError("Le modèle a refusé de traiter ce contenu")
+            raise AIError("The model declined to process this content")
         return "".join(b.text for b in resp.content if b.type == "text")
 
     async def list_models(self):
         try:
             return sorted([m.id async for m in self.client.models.list(limit=100)])
         except anthropic.APIError as e:
-            raise AIError(f"Impossible de lister les modèles : {type(e).__name__}")
+            raise AIError(f"Cannot list models: {type(e).__name__}")
 
 
 class ClaudeCLIProvider(Provider):
-    """Appelle `claude -p` en mode non interactif, sans aucun outil ni MCP."""
+    """Runs `claude -p` non-interactively, with no tools and no MCP."""
 
     TIMEOUT = 300
 
@@ -190,8 +190,8 @@ class ClaudeCLIProvider(Provider):
         args = [
             exe, "-p",
             "--output-format", "text",
-            "--tools", "",              # aucun outil (Bash, Edit, WebFetch...)
-            "--strict-mcp-config",      # ignore les serveurs MCP configurés sur le Pi
+            "--tools", "",              # no tools at all (Bash, Edit, WebFetch...)
+            "--strict-mcp-config",      # ignore the MCP servers configured on the Pi
             "--system-prompt", system,
         ]
         model = (self.cfg.model_fast if fast else "") or self.cfg.model
@@ -201,7 +201,7 @@ class ClaudeCLIProvider(Provider):
 
     async def complete(self, system, user, *, fast=False, max_tokens=2000):
         args = self.build_args(system, fast)
-        # Dossier vide : pas de CLAUDE.md ni de fichiers du projet visibles.
+        # Empty folder: no CLAUDE.md and no project files in sight.
         with tempfile.TemporaryDirectory(prefix="beseder-ai-") as cwd:
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -211,14 +211,14 @@ class ClaudeCLIProvider(Provider):
                     stderr=asyncio.subprocess.PIPE,
                 )
             except FileNotFoundError:
-                raise AIError(f"Commande introuvable : {self.cfg.command}")
+                raise AIError(f"Command not found: {self.cfg.command}")
             try:
                 out, err = await asyncio.wait_for(proc.communicate(user.encode()), self.TIMEOUT)
             except asyncio.TimeoutError:
                 proc.kill()
-                raise AIError("Claude CLI n'a pas répondu à temps")
+                raise AIError("Claude CLI timed out")
         if proc.returncode != 0:
-            raise AIError(f"Claude CLI a échoué : {err.decode(errors='replace')[:300]}")
+            raise AIError(f"Claude CLI failed: {err.decode(errors='replace')[:300]}")
         return out.decode(errors="replace")
 
     async def list_models(self):
@@ -232,4 +232,4 @@ def make_provider(cfg: AIConfig) -> Provider:
         return AnthropicProvider(cfg)
     if cfg.kind == "claude_cli":
         return ClaudeCLIProvider(cfg)
-    raise AIError("Aucune IA configurée")
+    raise AIError("No AI configured")

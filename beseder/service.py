@@ -1,4 +1,4 @@
-"""Logique applicative : config IA, tri, sync périodique."""
+"""Application logic: AI config, triage, periodic sync."""
 
 import asyncio
 import logging
@@ -37,7 +37,7 @@ class Beseder:
     def save_ai_config(self, data: dict) -> None:
         preset = data.get("preset", "")
         if preset not in PRESETS:
-            raise ValueError("Fournisseur inconnu")
+            raise ValueError("Unknown provider")
         cfg = {
             "preset": preset,
             "kind": PRESETS[preset]["kind"],
@@ -56,7 +56,7 @@ class Beseder:
     def provider(self) -> Provider:
         cfg = self.ai_config()
         if not cfg.configured:
-            raise AIError("Configure une IA dans les réglages")
+            raise AIError("Set up an AI provider in Settings")
         key = repr(cfg) + cfg.api_key
         if self._provider is None or self._provider_key != key:
             self._provider = make_provider(cfg)
@@ -67,7 +67,7 @@ class Beseder:
     def auto_triage(self) -> bool:
         return bool(self.db.get_setting("auto_triage", False))
 
-    # --- tri ------------------------------------------------------------
+    # --- triage ---------------------------------------------------------
     def apply_sender_rules(self) -> int:
         with self.db.conn() as c:
             cur = c.execute(
@@ -103,16 +103,16 @@ class Beseder:
                 "UPDATE messages SET category=?, category_source='ai' WHERE id=? AND category IS NULL",
                 [(cat, mid) for mid, cat in result.items()],
             )
-        self.db.audit("ai_triage", f"{len(result)}/{len(rows)} classés")
+        self.db.audit("ai_triage", f"{len(result)}/{len(rows)} classified")
         return len(result)
 
     def set_category(self, message_id: int, category: str, remember_sender: bool) -> None:
         if category not in CATEGORIES:
-            raise ValueError("Catégorie inconnue")
+            raise ValueError("Unknown category")
         with self.db.conn() as c:
             m = c.execute("SELECT from_addr FROM messages WHERE id=?", (message_id,)).fetchone()
             if m is None:
-                raise LookupError("Message introuvable")
+                raise LookupError("Message not found")
             c.execute("UPDATE messages SET category=?, category_source='user' WHERE id=?", (category, message_id))
             if remember_sender and m["from_addr"]:
                 c.execute(
@@ -120,7 +120,7 @@ class Beseder:
                     " ON CONFLICT(addr) DO UPDATE SET category=excluded.category",
                     (m["from_addr"], category, now_iso()),
                 )
-                # On applique tout de suite aux autres mails de cet expéditeur (sauf choix manuels).
+                # Apply right away to this sender's other messages (except manual choices).
                 c.execute(
                     "UPDATE messages SET category=?, category_source='rule'"
                     " WHERE from_addr=? AND (category_source IS NULL OR category_source!='user')",
@@ -149,5 +149,5 @@ class Beseder:
             try:
                 await self.sync_all()
             except Exception:
-                log.exception("Erreur pendant la synchronisation")
+                log.exception("Error during sync")
             await asyncio.sleep(self.config.sync_interval)

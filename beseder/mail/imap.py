@@ -1,7 +1,7 @@
-"""Synchronisation IMAP.
+"""IMAP sync.
 
-Écritures autorisées sur le serveur (voir CLAUDE.md) : marquer comme lu, ajouter un
-brouillon. Rien d'autre : pas d'envoi, pas de suppression, pas de déplacement.
+Allowed writes on the server (see CLAUDE.md): mark as read, add a draft.
+Nothing else: no sending, no deleting, no moving.
 """
 
 import logging
@@ -38,7 +38,7 @@ class MailService:
         self.config = config
         self.oauth = oauth or MicrosoftOAuth()
 
-    # --- connexion ----------------------------------------------------
+    # --- connection ---------------------------------------------------
     def _save_secret(self, account_id: int):
         def save(secret: dict) -> None:
             with self.db.conn() as c:
@@ -75,7 +75,7 @@ class MailService:
 
     # --- sync ---------------------------------------------------------
     def sync_account(self, account_id: int) -> int:
-        """Importe les nouveaux mails de INBOX et rafraîchit les drapeaux. Renvoie le nb de nouveaux."""
+        """Imports new INBOX messages and refreshes flags. Returns the number of new messages."""
         account = self.get_account(account_id)
         if account is None:
             return 0
@@ -85,8 +85,8 @@ class MailService:
             with self.db.conn() as c:
                 c.execute("UPDATE accounts SET last_sync=?, last_error=NULL WHERE id=?", (now_iso(), account_id))
             return new
-        except Exception as e:  # on stocke l'erreur pour l'afficher dans l'app
-            log.warning("Sync du compte %s échouée : %s", account_id, type(e).__name__)
+        except Exception as e:  # stored so the app can show it
+            log.warning("Sync failed for account %s: %s", account_id, type(e).__name__)
             with self.db.conn() as c:
                 c.execute("UPDATE accounts SET last_error=? WHERE id=?", (str(e)[:300], account_id))
             return 0
@@ -96,7 +96,7 @@ class MailService:
         uidvalidity = int(info.get(b"UIDVALIDITY", 0))
         last_uid = account["last_uid"]
         if account["uidvalidity"] is not None and account["uidvalidity"] != uidvalidity:
-            # La boîte a été reconstruite côté serveur : les UID ne veulent plus rien dire.
+            # The mailbox was rebuilt on the server: the old UIDs mean nothing anymore.
             with self.db.conn() as c:
                 c.execute("DELETE FROM messages WHERE account_id=?", (account["id"],))
             last_uid = 0
@@ -154,7 +154,7 @@ class MailService:
         return new
 
     def _refresh_flags(self, client: IMAPClient, account_id: int) -> None:
-        """Lu/non lu depuis l'iPhone, mails supprimés ailleurs : on se remet d'accord avec le serveur."""
+        """Read state changed on the phone, messages deleted elsewhere: catch up with the server."""
         with self.db.conn() as c:
             known = [
                 r["uid"]
@@ -174,7 +174,7 @@ class MailService:
                     seen = int(b"\\Seen" in flags[uid].get(b"FLAGS", ()))
                     c.execute("UPDATE messages SET seen=? WHERE account_id=? AND uid=?", (seen, account_id, uid))
 
-    # --- écritures autorisées ------------------------------------------
+    # --- allowed writes -----------------------------------------------
     def mark_seen(self, message_id: int) -> None:
         with self.db.conn() as c:
             m = c.execute("SELECT account_id, uid FROM messages WHERE id=?", (message_id,)).fetchone()
@@ -186,14 +186,14 @@ class MailService:
                 client.select_folder("INBOX")
                 client.add_flags([m["uid"]], [b"\\Seen"])
         except (IMAPClientError, OSError, PermissionError) as e:
-            log.warning("Impossible de marquer comme lu : %s", type(e).__name__)
+            log.warning("Could not mark as read: %s", type(e).__name__)
 
     def save_draft(self, message_id: int, body: str) -> str:
-        """Ajoute une réponse dans le dossier Brouillons du compte. N'envoie rien."""
+        """Adds a reply to the account's Drafts folder. Sends nothing."""
         with self.db.conn() as c:
             m = c.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
         if m is None:
-            raise LookupError("Message introuvable")
+            raise LookupError("Message not found")
         account = self.get_account(m["account_id"])
         draft = build_reply(m, account["email"], body)
         with self.connect(account) as client:
@@ -202,7 +202,7 @@ class MailService:
                 names = {f[2] for f in client.list_folders()}
                 folder = next((n for n in ("Drafts", "[Gmail]/Drafts", "Brouillons", "INBOX.Drafts") if n in names), None)
             if folder is None:
-                raise LookupError("Dossier Brouillons introuvable sur ce compte")
+                raise LookupError("No Drafts folder found on this account")
             client.append(folder, draft.as_bytes(), flags=[b"\\Draft", b"\\Seen"])
         self.db.audit("draft_saved", f"message={message_id} folder={folder}")
         return folder

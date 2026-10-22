@@ -1,4 +1,4 @@
-"""Chiffrement des secrets au repos (mots de passe d'application, tokens, clés API)."""
+"""Encryption at rest for secrets (app passwords, tokens, API keys)."""
 
 import json
 import os

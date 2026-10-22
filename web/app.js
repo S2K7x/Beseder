@@ -1,30 +1,67 @@
 "use strict";
-// Règle : jamais d'innerHTML avec du contenu de mail ou d'IA. Tout passe par h() / textContent.
+// Rule: never use innerHTML with message or AI content. Everything goes through h() / textContent.
 
-const $view = document.getElementById("view");
-const $title = document.getElementById("title");
-const $back = document.getElementById("back");
-const $syncState = document.getElementById("sync-state");
-
-const state = {
-  status: null,
-  category: "",
-  accountId: "",
-  q: "",
-  summary: null,
+// --- icons (Lucide-style strokes, built as DOM nodes) ---------------------------
+const ICONS = {
+  logo: [["path", "M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"],
+    ["path", "m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"], ["path", "m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"]],
+  inbox: [["path", "M22 12h-6l-2 3h-4l-2-3H2"],
+    ["path", "M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"]],
+  star: [["path", "M12 2.5l2.94 5.96 6.56.95-4.75 4.63 1.12 6.54L12 17.5l-5.87 3.08 1.12-6.54L2.5 9.41l6.56-.95z"]],
+  unread: [["path", "M22 13V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v12c0 1.1.9 2 2 2h9"], ["path", "m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"],
+    ["circle", 19, 17, 3]],
+  sparkles: [["path", "M9.94 15.5A2 2 0 0 0 8.5 14.06l-6.14-1.58a.5.5 0 0 1 0-.96L8.5 9.94A2 2 0 0 0 9.94 8.5l1.58-6.14a.5.5 0 0 1 .96 0l1.58 6.14a2 2 0 0 0 1.44 1.44l6.14 1.58a.5.5 0 0 1 0 .96l-6.14 1.58a2 2 0 0 0-1.44 1.44l-1.58 6.14a.5.5 0 0 1-.96 0z"],
+    ["path", "M20 3v4"], ["path", "M22 5h-4"]],
+  settings: [["path", "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"],
+    ["circle", 12, 12, 3]],
+  search: [["circle", 11, 11, 8], ["path", "m21 21-4.3-4.3"]],
+  refresh: [["path", "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"], ["path", "M21 3v5h-5"],
+    ["path", "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"], ["path", "M8 16H3v5"]],
+  arrowUpRight: [["path", "M7 7h10v10"], ["path", "M7 17 17 7"]],
+  arrowUp: [["path", "m5 12 7-7 7 7"], ["path", "M12 19V5"]],
+  chevronLeft: [["path", "m15 18-6-6 6-6"]],
+  reply: [["path", "m9 17-5-5 5-5"], ["path", "M20 18v-2a4 4 0 0 0-4-4H4"]],
+  image: [["rect", 3, 3, 18, 18, 2], ["circle", 9, 9, 2], ["path", "m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"]],
+  tag: [["path", "M12.59 2.59A2 2 0 0 0 11.17 2H4a2 2 0 0 0-2 2v7.17a2 2 0 0 0 .59 1.42l8.7 8.7a2.43 2.43 0 0 0 3.42 0l6.58-6.58a2.43 2.43 0 0 0 0-3.42z"],
+    ["circle", 7.5, 7.5, 0.5]],
+  fileText: [["path", "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"], ["path", "M14 2v4a2 2 0 0 0 2 2h4"],
+    ["path", "M10 9H8"], ["path", "M16 13H8"], ["path", "M16 17H8"]],
+  copy: [["rect", 8, 8, 14, 14, 2], ["path", "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"]],
+  mailOpen: [["path", "M21.2 8.4c.5.38.8.97.8 1.6v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V10a2 2 0 0 1 .8-1.6l8-6a2 2 0 0 1 2.4 0l8 6Z"],
+    ["path", "m22 10-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 10"]],
+  plus: [["path", "M5 12h14"], ["path", "M12 5v14"]],
+  shield: [["path", "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"]],
+  bell: [["path", "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"], ["path", "M10.3 21a1.94 1.94 0 0 0 3.4 0"]],
+  newspaper: [["path", "M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"],
+    ["path", "M18 14h-8"], ["path", "M15 18h-5"], ["path", "M10 6h8v4h-8V6Z"]],
+  megaphone: [["path", "m3 11 18-5v12L3 14v-3z"], ["path", "M11.6 16.8a3 3 0 1 1-5.8-1.6"]],
+  receipt: [["path", "M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"],
+    ["path", "M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"], ["path", "M12 17.5v-11"]],
+  folder: [["path", "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"]],
+  help: [["circle", 12, 12, 10], ["path", "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"], ["path", "M12 17h.01"]],
+  at: [["circle", 12, 12, 4], ["path", "M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"]],
 };
+const SVG_NS = "http://www.w3.org/2000/svg";
 
-const CAT_LABELS = {
-  important: "Important",
-  notifications: "Notifications",
-  newsletters: "Newsletters",
-  promotions: "Promotions",
-  factures: "Factures",
-  autres: "Autres",
-  non_trie: "Non trié",
-};
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("class", "icon");
+  svg.setAttribute("aria-hidden", "true");
+  for (const [kind, ...a] of ICONS[name] || []) {
+    const el = document.createElementNS(SVG_NS, kind);
+    if (kind === "path") el.setAttribute("d", a[0]);
+    if (kind === "circle") { el.setAttribute("cx", a[0]); el.setAttribute("cy", a[1]); el.setAttribute("r", a[2]); }
+    if (kind === "rect") {
+      el.setAttribute("x", a[0]); el.setAttribute("y", a[1]); el.setAttribute("width", a[2]);
+      el.setAttribute("height", a[3]); el.setAttribute("rx", a[4]);
+    }
+    svg.append(el);
+  }
+  return svg;
+}
 
-// --- utilitaires --------------------------------------------------------------
+// --- helpers ------------------------------------------------------------------
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
@@ -35,10 +72,16 @@ function h(tag, attrs = {}, ...children) {
     else if (k === "checked") el.checked = v;
     else el.setAttribute(k, v === true ? "" : v);
   }
-  for (const c of children.flat()) {
+  for (const c of children.flat(Infinity)) {
     if (c === null || c === undefined || c === false) continue;
     el.append(c instanceof Node ? c : document.createTextNode(String(c)));
   }
+  return el;
+}
+const $ = (id) => document.getElementById(id);
+// Like el.append(), but flattens arrays and skips null/false, as h() does.
+function put(el, ...children) {
+  for (const c of children.flat(Infinity)) if (c !== null && c !== undefined && c !== false) el.append(c);
   return el;
 }
 
@@ -50,416 +93,662 @@ async function api(path, opts = {}) {
   }
   const r = await fetch(path, init);
   let data = null;
-  try { data = await r.json(); } catch { /* vide */ }
-  if (!r.ok) throw new Error((data && data.detail) || `Erreur ${r.status}`);
+  try { data = await r.json(); } catch { /* empty body */ }
+  if (!r.ok) throw new Error((data && data.detail) || `Error ${r.status}`);
   return data;
 }
 
 let toastTimer;
 function toast(msg) {
-  const t = document.getElementById("toast");
+  const t = $("toast");
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 3500);
-}
-
-function fmtDate(iso) {
-  const d = new Date(iso);
-  const now = new Date();
-  if (d.toDateString() === now.toDateString())
-    return d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-  if (now - d < 6 * 864e5) return d.toLocaleDateString("fr-FR", { weekday: "short" });
-  return d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
+  toastTimer = setTimeout(() => (t.hidden = true), 3800);
 }
 
 function busy(btn, label) {
-  const old = btn.textContent;
+  const old = [...btn.childNodes];
   btn.disabled = true;
-  btn.textContent = label;
-  return () => { btn.disabled = false; btn.textContent = old; };
+  if (label) btn.replaceChildren(label);
+  return () => { btn.disabled = false; if (label) btn.replaceChildren(...old); };
 }
 
-function setHeader(title, showBack) {
-  $title.textContent = title;
-  $back.hidden = !showBack;
+const sameDay = (a, b) => a.toDateString() === b.toDateString();
+function fmtWhen(iso) {
+  const d = new Date(iso), now = new Date();
+  const time = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  if (sameDay(d, now)) return `Today · ${time}`;
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (sameDay(d, y)) return `Yesterday · ${time}`;
+  if (now - d < 6 * 864e5) return `${d.toLocaleDateString("en-GB", { weekday: "long" })} · ${time}`;
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: d.getFullYear() === now.getFullYear() ? undefined : "numeric" });
+}
+const fmtTime = (iso) => new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+const fmtDay = (iso) => new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+function fmtAgo(iso) {
+  if (!iso) return "never synced";
+  const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z");
+  const min = Math.round((Date.now() - d) / 60000);
+  if (min < 1) return "synced just now";
+  if (min < 60) return `synced ${min} min ago`;
+  return `synced ${fmtWhen(d.toISOString()).toLowerCase()}`;
 }
 
-async function refreshStatus() {
-  try {
-    state.status = await api("/api/status");
-    $syncState.textContent = state.status.syncing ? "sync…" : "";
-  } catch (e) {
-    toast(e.message);
-  }
-  return state.status;
+function initials(name, email) {
+  const src = (name || email || "?").replace(/[^\p{L}\p{N} ]/gu, " ").trim();
+  const parts = src.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return (parts[0] || "?").slice(0, 2).toUpperCase();
+}
+function hue(s) {
+  let x = 0;
+  for (const c of s || "") x = (x * 31 + c.charCodeAt(0)) % 360;
+  return x;
+}
+function avatarStyle(key) {
+  const hh = hue(key);
+  return matchMedia("(prefers-color-scheme: dark)").matches
+    ? `background:hsl(${hh} 30% 26%);color:hsl(${hh} 70% 82%)`
+    : `background:hsl(${hh} 70% 91%);color:hsl(${hh} 45% 32%)`;
+}
+function avatar(name, email, size = "", kind = null) {
+  const el = h("div", { class: `avatar ${size}`, "aria-hidden": "true", style: avatarStyle(email || name) }, initials(name, email));
+  if (kind) el.append(h("span", { class: "kind", title: KIND_LABELS[kind] || kind }, KIND_LETTERS[kind] || "@"));
+  return el;
+}
+function splitName(name, email) {
+  const n = (name || email || "").trim();
+  const i = n.indexOf(" ");
+  return i > 0 ? [n.slice(0, i), n.slice(i + 1)] : [n, ""];
 }
 
-// --- navigation ---------------------------------------------------------------
-function go(hash) { location.hash = hash; }
+// --- constants -------------------------------------------------------------------
+const CATS = {
+  important: { label: "Important", icon: "star" },
+  notifications: { label: "Notifications", icon: "bell" },
+  newsletters: { label: "Newsletters", icon: "newspaper" },
+  promotions: { label: "Promotions", icon: "megaphone" },
+  receipts: { label: "Receipts", icon: "receipt" },
+  other: { label: "Other", icon: "folder" },
+  untriaged: { label: "Untriaged", icon: "help" },
+};
+const KIND_LETTERS = { gmail: "G", icloud: "i", outlook: "O", imap: "@" };
+const KIND_LABELS = { gmail: "Gmail", icloud: "iCloud", outlook: "Outlook", imap: "IMAP" };
+
+const state = {
+  status: null,
+  summary: null,
+  category: "",
+  unread: false,
+  accountId: "",
+  q: "",
+  selectedId: null,
+  view: "inbox",
+};
+
+// --- router -----------------------------------------------------------------------
+const isPhone = () => matchMedia("(max-width: 860px)").matches;
+function go(hash) { if (location.hash !== hash) location.hash = hash; else route(); }
 window.addEventListener("hashchange", route);
-$back.addEventListener("click", () => history.length > 1 ? history.back() : go("#/"));
-document.getElementById("settings").addEventListener("click", () => go("#/reglages"));
-document.getElementById("sync").addEventListener("click", async () => {
-  try {
-    const r = await api("/api/sync", { method: "POST" });
-    toast(r.started ? "Synchronisation lancée" : "Synchronisation déjà en cours");
-    $syncState.textContent = "sync…";
-    setTimeout(() => route(), 4000);
-  } catch (e) { toast(e.message); }
-});
 
 async function route() {
   const hash = location.hash || "#/";
   const m = hash.match(/^#\/m\/(\d+)$/);
-  window.scrollTo(0, 0);
-  if (m) return viewMessage(Number(m[1]));
-  if (hash === "#/reglages") return viewSettings();
-  return viewInbox();
+  state.selectedId = m ? Number(m[1]) : null;
+  state.view = m ? "message" : hash === "#/settings" ? "settings" : hash === "#/brief" ? "brief" : "inbox";
+  document.body.dataset.view = state.view;
+  $("back").hidden = !(isPhone() && state.view === "message");
+  if (isPhone()) window.scrollTo(0, 0);
+  await refreshStatus();
+  renderChrome();
+  if (state.view === "settings") {
+    $("settings-col").hidden = false;
+    return renderSettings();
+  }
+  $("settings-col").hidden = true;
+  renderSide();
+  renderReader();
+  // The list is only rebuilt when the filters change, so selecting an email keeps the scroll position.
+  if (!$("list-col").dataset.ready) await renderList();
+  else markSelected();
 }
 
-// --- boîte de réception -------------------------------------------------------
-async function viewInbox() {
-  setHeader("Beseder", false);
-  const st = await refreshStatus();
-  if (!st) return;
-  $view.replaceChildren();
+async function refreshStatus() {
+  try {
+    const [st, sum] = await Promise.all([api("/api/status"), state.summary ? null : api("/api/summary/last")]);
+    state.status = st;
+    if (sum) state.summary = sum;
+    $("sync-state").textContent = st.syncing ? "Syncing…" : "";
+  } catch (e) { toast(e.message); }
+  return state.status;
+}
 
-  if (st.accounts.length === 0) {
-    $view.append(h("div", { class: "card" },
-      h("h2", {}, "Bienvenue 👋"),
-      h("p", {}, "Ajoute tes boîtes mail et configure une IA dans les réglages."),
-      h("button", { class: "btn primary", onclick: () => go("#/reglages") }, "Ouvrir les réglages")));
+// --- chrome: rail, tabs, filters ------------------------------------------------------
+function navItems() {
+  const counts = state.status?.unread_by_category || {};
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const listView = state.view === "inbox" || state.view === "message";
+  return [
+    { icon: "inbox", label: "Inbox", badge: total, active: listView && !state.category && !state.unread,
+      go: () => { state.category = ""; state.unread = false; navigateList(); } },
+    { icon: "star", label: "Important", badge: counts.important, active: listView && state.category === "important",
+      go: () => { state.category = "important"; state.unread = false; navigateList(); } },
+    { icon: "unread", label: "Unread", active: listView && state.unread && !state.category,
+      go: () => { state.category = ""; state.unread = true; navigateList(); } },
+    { icon: "sparkles", label: "Brief", active: state.view === "brief", go: () => go("#/brief") },
+  ];
+}
+
+function navigateList() {
+  $("list-col").dataset.ready = "";
+  if (isPhone() || state.view === "settings" || state.view === "brief") go("#/");
+  else route();
+}
+
+function renderChrome() {
+  const items = navItems();
+  $("rail-nav").replaceChildren(...items.map((it) => {
+    const b = h("button", { class: "round" + (it.active ? " active" : ""), title: it.label, "aria-label": it.label, onclick: it.go },
+      icon(it.icon));
+    if (it.badge) b.append(h("span", { class: "badge" }, it.badge > 99 ? "99+" : it.badge));
+    return b;
+  }));
+  $("rail-settings").classList.toggle("active", state.view === "settings");
+
+  const tabs = [items[0], items[1], items[3],
+    { icon: "settings", label: "Settings", active: state.view === "settings", go: () => go("#/settings") }];
+  $("tabbar").replaceChildren(...tabs.map((it) => h("a", { href: "#", class: it.active ? "active" : "",
+    onclick: (e) => { e.preventDefault(); it.go(); } }, icon(it.icon), it.label,
+    it.badge ? h("span", { class: "badge" }, it.badge > 99 ? "99+" : it.badge) : null)));
+
+  const sel = $("account-filter");
+  const accounts = state.status?.accounts || [];
+  sel.replaceChildren(h("option", { value: "" }, "All"), ...accounts.map((a) => h("option", { value: String(a.id) }, a.name)));
+  sel.value = state.accountId;
+  sel.hidden = accounts.length < 2;
+
+  const me = state.status?.my_name || "Me";
+  $("me").textContent = initials(me);
+  $("me").style.cssText = avatarStyle(me);
+  $("me").title = me;
+}
+
+// --- list column --------------------------------------------------------------------
+async function renderList(before) {
+  const col = $("list-col");
+  const st = state.status;
+  if (!st) return;
+  if (!before) {
+    col.dataset.ready = "1";
+    const counts = st.unread_by_category || {};
+    const chip = (key, label) => h("button", {
+      class: "chip" + (state.category === key ? " active" : ""),
+      onclick: () => { state.category = state.category === key ? "" : key; navigateList(); },
+    }, label, counts[key] ? h("span", { class: "count" }, counts[key]) : null);
+    col.replaceChildren(
+      miniBrief(),
+      h("div", { class: "chips" },
+        h("button", { class: "chip" + (!state.category ? " active" : ""), onclick: () => { state.category = ""; navigateList(); } },
+          state.unread ? "All unread" : "All"),
+        Object.keys(st.categories).map((k) => chip(k, CATS[k]?.label || k)),
+        counts.untriaged ? chip("untriaged", CATS.untriaged.label) : null),
+      h("div", { id: "cards", style: "display:flex;flex-direction:column;gap:12px" }));
+  }
+  if (!st.accounts.length) {
+    $("cards").replaceChildren(h("div", { class: "card empty" }, h("div", { class: "big" }, icon("inbox")),
+      h("p", {}, "No mailbox yet."), h("button", { class: "pill dark sm", onclick: () => go("#/settings") }, "Add a mailbox")));
     return;
   }
-
-  // Boutons IA
-  const summaryBtn = h("button", { class: "btn primary", onclick: () => runSummary(summaryBtn) }, "✨ Résumer les non lus");
-  const triageToggle = h("input", { type: "checkbox", checked: st.auto_triage, onchange: async (e) => {
-    try {
-      await api("/api/settings/triage", { method: "PUT", body: { auto: e.target.checked } });
-      toast(e.target.checked ? "Tri automatique activé" : "Tri automatique désactivé");
-      if (e.target.checked) setTimeout(() => route(), 5000);
-    } catch (err) { e.target.checked = !e.target.checked; toast(err.message); }
-  } });
-  $view.append(h("div", { class: "actions" },
-    summaryBtn,
-    h("label", { class: "switch" }, triageToggle, h("span", { class: "track" }), "Tri auto")));
-
-  if (!st.ai_configured)
-    $view.append(h("p", { class: "note" }, "Aucune IA configurée : le résumé et le tri ne marcheront pas. ",
-      h("a", { href: "#/reglages" }, "Configurer")));
-  if (st.triage_error) $view.append(h("p", { class: "error" }, "Tri : " + st.triage_error));
-  for (const a of st.accounts)
-    if (a.last_error) $view.append(h("p", { class: "error" }, `${a.name} : ${a.last_error}`));
-
-  const summaryBox = h("div", { id: "summary" });
-  $view.append(summaryBox);
-  if (state.summary) renderSummary(summaryBox, state.summary);
-
-  // Catégories
-  const counts = st.unread_by_category || {};
-  const chip = (key, label) => h("button", {
-    class: "chip" + (state.category === key ? " active" : ""),
-    onclick: () => { state.category = key; viewInbox(); },
-  }, label, counts[key] ? h("span", { class: "count" }, counts[key]) : null);
-  const totalUnread = Object.values(counts).reduce((a, b) => a + b, 0);
-  $view.append(h("div", { class: "chips" },
-    h("button", { class: "chip" + (state.category === "" ? " active" : ""),
-      onclick: () => { state.category = ""; viewInbox(); } },
-      "Tout", totalUnread ? h("span", { class: "count" }, totalUnread) : null),
-    Object.keys(st.categories).map((k) => chip(k, CAT_LABELS[k] || k)),
-    counts.non_trie ? chip("non_trie", CAT_LABELS.non_trie) : null));
-
-  // Filtres
-  const search = h("input", { type: "search", placeholder: "Rechercher", value: state.q, class: "grow" });
-  let t;
-  search.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { state.q = search.value; loadList(); }, 300); });
-  const accSel = h("select", { onchange: (e) => { state.accountId = e.target.value; loadList(); } },
-    h("option", { value: "" }, "Toutes les boîtes"),
-    st.accounts.map((a) => h("option", { value: String(a.id) }, a.name)));
-  accSel.value = state.accountId;
-  $view.append(h("div", { class: "filters" }, search, accSel));
-
-  const list = h("div", { class: "list", id: "list" });
-  $view.append(list);
-  await loadList();
-}
-
-async function loadList(before) {
-  const list = document.getElementById("list");
-  if (!list) return;
   const params = new URLSearchParams();
   if (state.category) params.set("category", state.category);
   if (state.accountId) params.set("account_id", state.accountId);
+  if (state.unread) params.set("unread", "true");
   if (state.q) params.set("q", state.q);
   if (before) params.set("before", before);
   let rows;
   try { rows = await api("/api/messages?" + params); } catch (e) { toast(e.message); return; }
-  if (!before) list.replaceChildren();
-  document.getElementById("more")?.remove();
+  const cards = $("cards");
+  $("more")?.remove();
   if (!before && rows.length === 0) {
-    list.append(h("div", { class: "empty" }, state.status?.syncing ? "Synchronisation en cours…" : "Aucun mail ici."));
+    cards.replaceChildren(h("div", { class: "card empty" }, h("div", { class: "big" }, icon("inbox")),
+      st.syncing ? "Syncing your mailboxes…" : state.q ? "No match." : "Nothing here. Enjoy the quiet."));
     return;
   }
-  for (const r of rows) {
-    list.append(h("div", { class: "item" + (r.seen ? "" : " unread"), onclick: () => go(`#/m/${r.id}`) },
-      h("div", { class: "line1" },
-        h("span", { class: "from" }, r.from_name || r.from_addr),
-        h("span", { class: "muted small" }, fmtDate(r.date))),
-      h("div", { class: "subject" },
-        r.category ? h("span", { class: "tag" }, CAT_LABELS[r.category] || r.category) : null,
-        r.subject || "(sans objet)"),
-      h("div", { class: "snippet" }, r.snippet)));
-  }
+  const prio = priorityMap();
+  for (const r of rows) cards.append(mailCard(r, prio[r.id]));
   if (rows.length === 50) {
-    const more = h("button", { class: "btn", id: "more", style: "margin:12px auto;display:block",
-      onclick: () => loadList(rows[rows.length - 1].date) }, "Plus de mails");
-    list.after(more);
+    cards.after(h("button", { class: "pill more", id: "more", onclick: () => renderList(rows[rows.length - 1].date) }, "Load more"));
   }
+  markSelected();
+}
+
+function priorityMap() {
+  const map = {};
+  for (const it of state.summary?.items || []) map[it.id] = it.priority;
+  return map;
+}
+
+function mailCard(r, priority) {
+  const [first, last] = splitName(r.from_name, r.from_addr);
+  return h("article", {
+    class: "card mail-card" + (r.seen ? "" : " unread"), "data-id": r.id, tabindex: "0",
+    onclick: () => go(`#/m/${r.id}`),
+    onkeydown: (e) => { if (e.key === "Enter") go(`#/m/${r.id}`); },
+  },
+    h("div", { class: "who" },
+      avatar(r.from_name, r.from_addr),
+      h("div", { class: "who-name" }, h("span", {}, first), h("span", {}, last || r.account_name)),
+      h("span", { class: "round xs", "aria-hidden": "true" }, icon("arrowUpRight"))),
+    h("h3", {}, r.subject || "(no subject)"),
+    h("div", { class: "when" }, fmtWhen(r.date), state.status.accounts.length > 1 && last ? ` · ${r.account_name}` : ""),
+    r.snippet ? h("div", { class: "snippet" }, r.snippet) : null,
+    (r.category || priority === "high") ? h("div", { class: "tags" },
+      priority === "high" ? h("span", { class: "tag high" }, "High priority") : null,
+      r.category ? h("span", { class: "tag" }, CATS[r.category]?.label || r.category) : null) : null);
+}
+
+function markSelected() {
+  document.querySelectorAll(".mail-card").forEach((c) => c.classList.toggle("selected", Number(c.dataset.id) === state.selectedId));
+}
+
+// Medium screens hide the side column: keep the essentials at the top of the list.
+function miniBrief() {
+  return h("div", { class: "card mini-brief", style: "padding:12px 14px 12px 18px;align-items:center;gap:10px" },
+    triageSwitch(state.status.auto_triage),
+    h("span", { style: "flex:1" }),
+    h("button", { class: "pill sm", onclick: () => go("#/brief") }, icon("sparkles"), "Brief"));
+}
+
+// --- reader column ------------------------------------------------------------------
+function renderReader() {
+  const col = $("reader-col");
+  if (state.selectedId) return renderMessage(col, state.selectedId);
+  col.replaceChildren(briefHome());
+}
+
+function greeting() {
+  const hr = new Date().getHours();
+  const part = hr < 5 ? "Good night" : hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
+  const name = (state.status?.my_name || "").split(" ")[0];
+  return name ? `${part}, ${name}` : part;
+}
+
+function briefHome() {
+  const st = state.status;
+  const s = state.summary;
+  const card = h("div", { class: "card brief" });
+  if (!st?.accounts.length) {
+    put(card, h("p", { class: "hello" }, "Welcome to Beseder 👋"),
+      h("p", { class: "overview" }, "Add your mailboxes and connect an AI. It sorts your mail, briefs you on what's unread and drafts replies when you ask. It can never send or delete anything."),
+      h("div", { class: "btns" }, h("button", { class: "pill dark", onclick: () => go("#/settings") }, icon("plus"), "Get started")));
+    return card;
+  }
+  const unread = Object.values(st.unread_by_category || {}).reduce((a, b) => a + b, 0);
+  const n = st.accounts.length;
+  const btn = h("button", { class: "pill dark", onclick: () => runSummary(btn) }, icon("sparkles"), s ? "Refresh brief" : "Summarize unread");
+  put(card, 
+    h("p", { class: "hello" }, greeting()),
+    h("p", { class: "muted", style: "margin:4px 0 0" },
+      `${unread} unread email${unread === 1 ? "" : "s"} across ${n} mailbox${n === 1 ? "" : "es"}.`),
+    !st.ai_configured ? h("div", { class: "notice" }, "No AI connected yet. ", h("a", { href: "#/settings" }, "Set one up"),
+      " to get briefs and auto-triage.") : null);
+  if (s) {
+    put(card, 
+      h("p", { class: "overview" }, s.overview),
+      h("div", { class: "small muted" }, `Brief of ${s.count} unread · ${fmtWhen(s.generated_at).toLowerCase()}`),
+      s.items.map((it) => h("div", { class: "brief-item", onclick: () => go(`#/m/${it.id}`) },
+        avatar(it.from_name, it.from_addr || it.from_name, "sm"),
+        h("div", { class: "grow" },
+          h("div", { class: "t" }, it.from_name, h("span", { class: "muted", style: "font-weight:400" }, " · ", it.subject)),
+          h("div", { class: "s" }, it.summary)),
+        h("span", { class: "tag" + (it.priority === "high" ? " high" : "") }, it.priority))));
+  } else {
+    put(card, h("p", { class: "overview muted" }, "Tap the button and your AI will read your unread emails and tell you what matters."));
+  }
+  put(card, h("div", { class: "btns" }, btn));
+  return card;
 }
 
 async function runSummary(btn) {
-  const done = busy(btn, "Résumé en cours…");
+  const done = btn ? busy(btn, "Reading your emails…") : null;
+  const doneTop = busy($("summarize"));
   try {
     const body = state.accountId ? { account_id: Number(state.accountId) } : {};
     state.summary = await api("/api/summary", { method: "POST", body });
-    renderSummary(document.getElementById("summary"), state.summary);
+    toast("Your brief is ready");
+    $("list-col").dataset.ready = "";
+    if (isPhone()) go("#/brief");
+    else if (state.view === "message" || state.view === "settings") { if (state.view === "settings") go("#/"); else { renderSide(); renderList(); } }
+    else route();
   } catch (e) { toast(e.message); }
-  finally { done(); }
+  finally { if (done) done(); doneTop(); }
 }
 
-function renderSummary(box, s) {
-  box.replaceChildren(h("div", { class: "card summary" },
-    h("div", { class: "row" },
-      h("h2", { class: "grow" }, `Résumé de ${s.count} non lu${s.count > 1 ? "s" : ""}`),
-      h("button", { class: "icon-btn", "aria-label": "Fermer", onclick: () => { state.summary = null; box.replaceChildren(); } }, "×")),
-    h("p", { class: "overview" }, s.overview),
-    s.items.map((it) => h("div", { class: "sitem", onclick: () => go(`#/m/${it.id}`) },
-      h("div", {}, h("span", { class: "prio " + it.priority }, it.priority), h("b", {}, it.from_name), " — ", it.subject),
-      h("div", { class: "muted small" }, it.summary)))));
+async function renderMessage(col, id) {
+  let m;
+  try { m = await api(`/api/messages/${id}`); } catch (e) {
+    col.replaceChildren(h("div", { class: "card empty" }, e.message));
+    return;
+  }
+  if (state.selectedId !== id) return;
+  if (!m.seen) {
+    api(`/api/messages/${id}/read`, { method: "POST" }).then(() => {
+      document.querySelector(`.mail-card[data-id="${id}"]`)?.classList.remove("unread");
+    }).catch(() => {});
+  }
+  const account = state.status.accounts.find((a) => a.id === m.account_id);
+
+  // Category picker: takes the place of the mockup's "Mark as spam" pill.
+  const catSel = h("select", { "aria-label": "Category" },
+    h("option", { value: "" }, "No category"),
+    Object.keys(state.status.categories).map((k) => h("option", { value: k }, CATS[k]?.label || k)));
+  catSel.value = m.category || "";
+  catSel.addEventListener("change", async () => {
+    if (!catSel.value) return;
+    try {
+      await api(`/api/messages/${id}/category`, { method: "POST", body: { category: catSel.value, remember_sender: false } });
+      toast(`Moved to ${CATS[catSel.value].label}`);
+      await refreshStatus();
+      renderSide(); renderChrome();
+    } catch (e) { toast(e.message); }
+  });
+
+  let images = false, plain = !m.body_html;
+  const bodyBox = h("div", { class: "body" });
+  const renderBody = () => bodyBox.replaceChildren(
+    m.truncated ? h("div", { class: "notice" }, m.snippet) : "",
+    !plain ? emailFrame(m.body_html, images) : h("pre", { class: "text" }, m.body_text || m.snippet));
+  renderBody();
+
+  const imgBtn = h("button", { class: "round sm", title: "Show remote images (trackers are blocked by default)",
+    "aria-label": "Show images", hidden: !m.body_html,
+    onclick: () => { images = !images; imgBtn.classList.toggle("on", images); renderBody(); } }, icon("image"));
+  const textBtn = h("button", { class: "round sm", title: "Plain text version", "aria-label": "Plain text", hidden: !m.body_html,
+    onclick: () => { plain = !plain; textBtn.classList.toggle("on", plain); renderBody(); } }, icon("fileText"));
+  const ruleBtn = h("button", { class: "round sm", title: "Always file this sender in this category", "aria-label": "Sender rule",
+    onclick: async () => {
+      if (!catSel.value) return toast("Pick a category first");
+      try {
+        await api(`/api/messages/${id}/category`, { method: "POST", body: { category: catSel.value, remember_sender: true } });
+        toast(`Everything from ${m.from_addr} now goes to ${CATS[catSel.value].label}`);
+        ruleBtn.classList.add("on");
+        await refreshStatus();
+        $("list-col").dataset.ready = "";
+        renderSide(); renderList();
+      } catch (e) { toast(e.message); }
+    } }, icon("tag"));
+
+  const composer = buildComposer(m);
+  const replyBtn = h("button", { class: "pill", onclick: () => composer.draft() }, icon("reply"), "Reply with AI");
+
+  col.replaceChildren(h("div", { class: "card reader" },
+    h("div", { class: "reader-top" },
+      h("label", { class: "select-pill" }, icon("tag"), catSel),
+      h("span", { class: "date" }, new Date(m.date).toLocaleString("en-GB",
+        { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" }))),
+    h("div", { class: "person" },
+      avatar(m.from_name, m.from_addr, "lg", account?.kind),
+      h("h2", {}, m.from_name || m.from_addr),
+      h("div", { class: "sub" }, m.from_name ? `${m.from_addr} · ` : "", `to ${m.account_name}`),
+      h("div", { class: "subject" }, m.subject || "(no subject)")),
+    h("div", { class: "actions-row" }, replyBtn, ruleBtn, imgBtn, textBtn),
+    bodyBox,
+    composer.el));
+  markSelected();
 }
 
-// --- lecture d'un mail --------------------------------------------------------
 function emailFrame(html, allowImages) {
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
   const csp = `default-src 'none'; style-src 'unsafe-inline'; img-src data: ${allowImages ? "https: http:" : ""}; font-src data:`;
   const doc = `<!doctype html><html><head><meta charset="utf-8">` +
     `<meta http-equiv="Content-Security-Policy" content="${csp}">` +
     `<meta name="viewport" content="width=device-width, initial-scale=1"><base target="_blank">` +
-    `<style>body{margin:12px;font:15px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#16161d;word-wrap:break-word}` +
-    `img{max-width:100%;height:auto}table{max-width:100%}</style></head><body>${html}</body></html>`;
-  // Pas de allow-scripts : aucun script ne peut tourner, même si le nettoyage ratait quelque chose.
-  const frame = h("iframe", { sandbox: "allow-same-origin allow-popups allow-popups-to-escape-sandbox", title: "Contenu du mail" });
+    `<style>html{color-scheme:light}body{margin:0;font:15px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;` +
+    `color:#121216;word-wrap:break-word;${dark ? "background:#fff;padding:16px;border-radius:16px" : ""}}` +
+    `img{max-width:100%;height:auto}table{max-width:100%!important}</style></head><body>${html}</body></html>`;
+  // No allow-scripts: no script can run, even if sanitizing missed something.
+  const frame = h("iframe", { sandbox: "allow-same-origin allow-popups allow-popups-to-escape-sandbox", title: "Email content" });
   frame.srcdoc = doc;
-  frame.addEventListener("load", () => {
-    try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 4 + "px"; } catch { /* ignore */ }
-  });
+  const fit = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 4 + "px"; } catch { /* ignore */ } };
+  frame.addEventListener("load", () => { fit(); setTimeout(fit, 400); });
   return frame;
 }
 
-async function viewMessage(id) {
-  setHeader("", true);
-  let m;
-  try { m = await api(`/api/messages/${id}`); } catch (e) { toast(e.message); return; }
-  if (!state.status) await refreshStatus();
-  $title.textContent = m.account_name;
-  if (!m.seen) api(`/api/messages/${id}/read`, { method: "POST" }).catch(() => {});
+// The reply box of the mockup: you write, or you tell the AI what to say and tap ✨.
+// The dark arrow saves to the Drafts folder. Nothing is ever sent from here.
+function buildComposer(m) {
+  const ta = h("textarea", { rows: "2", placeholder: "Write a reply, or tell the AI what to say (\"accept, suggest Tuesday\") and tap ✨" });
+  const grow = () => { ta.style.height = "auto"; ta.style.height = ta.scrollHeight + "px"; };
+  ta.addEventListener("input", grow);
+  const to = h("div", { class: "small muted", hidden: true });
+  let lastInstructions = "";
+  let lastDraft = null;
 
-  const catSel = h("select", {},
-    h("option", { value: "" }, "— catégorie —"),
-    Object.keys(state.status.categories).map((k) => h("option", { value: k }, CAT_LABELS[k] || k)));
-  catSel.value = m.category || "";
-  const remember = h("input", { type: "checkbox" });
-  catSel.addEventListener("change", async () => {
-    if (!catSel.value) return;
+  const aiBtn = h("button", { class: "round xs", title: "Draft with AI", "aria-label": "Draft with AI" }, icon("sparkles"));
+  async function draft() {
+    ta.focus();
+    // Unchanged draft (or empty box): regenerate with the same instructions. Otherwise the box is the new instruction.
+    const instructions = ta.value === lastDraft || !ta.value.trim() ? lastInstructions : ta.value;
+    const done = busy(aiBtn);
+    const prev = ta.value;
+    ta.value = "Writing a draft…";
+    ta.disabled = true;
     try {
-      await api(`/api/messages/${id}/category`, { method: "POST", body: { category: catSel.value, remember_sender: remember.checked } });
-      toast(remember.checked ? `Règle enregistrée pour ${m.from_addr}` : "Catégorie modifiée");
-    } catch (e) { toast(e.message); }
-  });
-
-  const bodyBox = h("div", { class: "msg-body" });
-  let images = false;
-  const imgBtn = h("button", { class: "btn small", onclick: () => {
-    images = !images;
-    imgBtn.textContent = images ? "Bloquer les images" : "Afficher les images";
-    renderBody();
-  } }, "Afficher les images");
-  function renderBody() {
-    bodyBox.replaceChildren(m.body_html ? emailFrame(m.body_html, images) : h("pre", { class: "msg-text" }, m.body_text || m.snippet));
+      const d = await api(`/api/messages/${m.id}/draft`, { method: "POST", body: { instructions } });
+      lastInstructions = instructions;
+      lastDraft = d.body;
+      ta.value = d.body;
+      to.hidden = false;
+      to.textContent = `To ${d.to}. Review it: nothing is sent automatically.`;
+    } catch (e) { ta.value = prev; toast(e.message); }
+    finally { ta.disabled = false; done(); grow(); }
   }
-  renderBody();
+  aiBtn.addEventListener("click", draft);
 
-  const draftBox = h("div");
-  $view.replaceChildren(...[
-    h("div", { class: "card msg-head" },
-      h("h2", {}, m.subject || "(sans objet)"),
-      h("div", { class: "meta" }, h("b", {}, m.from_name || m.from_addr), m.from_name ? ` <${m.from_addr}>` : ""),
-      h("div", { class: "meta" }, "À : ", m.to_addrs || "—"),
-      m.cc_addrs ? h("div", { class: "meta" }, "Cc : ", m.cc_addrs) : null,
-      h("div", { class: "meta" }, new Date(m.date).toLocaleString("fr-FR")),
-      h("div", { class: "row", style: "margin-top:10px" },
-        catSel,
-        h("label", { class: "small muted row" }, remember, "toujours pour cet expéditeur"))),
-    m.body_html ? h("div", { class: "row", style: "margin-bottom:8px" }, imgBtn,
-      h("span", { class: "muted small" }, "Images bloquées par défaut (pixels de suivi).")) : null,
-    bodyBox,
-    h("div", { class: "actions" },
-      h("button", { class: "btn primary", onclick: () => openDraft(m, draftBox) }, "✍️ Rédiger une réponse avec l'IA")),
-    draftBox,
-  ].filter(Boolean));
-}
-
-function openDraft(m, box) {
-  const instr = h("input", { type: "text", placeholder: "Consignes (optionnel) : ex. « accepte, propose mardi »" });
-  const genBtn = h("button", { class: "btn primary" }, "Générer");
-  const out = h("div");
-  genBtn.addEventListener("click", async () => {
-    const done = busy(genBtn, "Rédaction…");
-    try {
-      const d = await api(`/api/messages/${m.id}/draft`, { method: "POST", body: { instructions: instr.value } });
-      renderDraft(m, d, out);
-    } catch (e) { toast(e.message); }
-    finally { done(); }
-  });
-  box.replaceChildren(h("div", { class: "card" },
-    h("h2", {}, "Brouillon de réponse"),
-    h("div", { class: "row" }, h("div", { class: "grow" }, instr), genBtn),
-    out));
-  instr.focus();
-}
-
-function renderDraft(m, d, out) {
-  const ta = h("textarea", {}, d.body);
-  ta.value = d.body;
-  const addr = (d.to.match(/<([^>]+)>/) || [null, d.to])[1].trim();
-  const subject = /^re\s?:/i.test(d.subject) ? d.subject : `Re: ${d.subject}`;
-  const saveBtn = h("button", { class: "btn primary" }, "Enregistrer dans Brouillons");
+  const copyBtn = h("button", { class: "round xs", title: "Copy", "aria-label": "Copy", onclick: async () => {
+    try { await navigator.clipboard.writeText(ta.value); toast("Copied"); } catch { toast("Cannot copy here"); }
+  } }, icon("copy"));
+  const mailBtn = h("button", { class: "round xs", title: "Open in your mail app", "aria-label": "Open in mail app", onclick: () => {
+    const addr = ((m.reply_to_display || "").match(/<([^>]+)>/) || [null, m.reply_to_display || m.from_addr])[1].trim();
+    const subject = /^re\s?:/i.test(m.subject || "") ? m.subject : `Re: ${m.subject || ""}`;
+    location.href = `mailto:${encodeURIComponent(addr)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(ta.value)}`;
+  } }, icon("mailOpen"));
+  const saveBtn = h("button", { class: "round dark send", title: "Save to Drafts (not sent)", "aria-label": "Save to Drafts" }, icon("arrowUp"));
   saveBtn.addEventListener("click", async () => {
-    const done = busy(saveBtn, "Enregistrement…");
+    if (!ta.value.trim()) return toast("Write something first, or tap ✨");
+    const done = busy(saveBtn);
     try {
       const r = await api(`/api/messages/${m.id}/draft/save`, { method: "POST", body: { body: ta.value } });
-      toast(`Brouillon enregistré dans « ${r.folder} ». Envoie-le depuis ta boîte mail.`);
+      toast(`Saved in "${r.folder}". Send it from your mail app when ready.`);
     } catch (e) { toast(e.message); }
     finally { done(); }
   });
-  out.replaceChildren(
-    h("p", { class: "note" }, "Destinataire : ", d.to, ". Relis avant d'envoyer : rien n'est envoyé automatiquement."),
-    ta,
-    h("div", { class: "row", style: "margin-top:8px" },
-      saveBtn,
-      h("button", { class: "btn", onclick: async () => {
-        try { await navigator.clipboard.writeText(ta.value); toast("Copié"); } catch { toast("Copie impossible"); }
-      } }, "Copier"),
-      h("a", { class: "btn", href: "#", onclick: (e) => {
-        e.preventDefault();
-        location.href = `mailto:${encodeURIComponent(addr)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(ta.value)}`;
-      } }, "Ouvrir dans Mail")));
+
+  const el = h("div", { class: "composer" }, to, ta,
+    h("div", { class: "bar" }, aiBtn, copyBtn, mailBtn, h("span", { class: "hint" }, "Saved to Drafts, never sent"), saveBtn));
+  return { el, draft };
 }
 
-// --- réglages -----------------------------------------------------------------
-async function viewSettings() {
-  setHeader("Réglages", true);
+// --- side column ----------------------------------------------------------------------
+function renderSide() {
+  if (!state.status) return;
+  $("side-col").replaceChildren(briefWidget(), triageWidget(), mailboxesWidget());
+}
+
+function briefWidget() {
+  const s = state.summary;
+  const items = (s?.items || []).slice(0, 2);
+  const card = h("div", { class: "card brief-widget" },
+    h("div", { class: "card-head" }, h("h2", {}, icon("sparkles"), "AI brief"),
+      h("button", { class: "round xs", title: "Open the brief", "aria-label": "Open the brief", onclick: () => go(isPhone() ? "#/brief" : "#/") },
+        icon("arrowUpRight"))));
+  if (!items.length) {
+    put(card, h("p", { class: "muted small", style: "margin:0" },
+      s ? s.overview : "Tap “Summarize unread” and your AI will tell you what matters."));
+  } else {
+    put(card, h("div", { class: "tiles" }, items.map((it) => {
+      const when = it.date || s.generated_at;
+      return h("div", { class: "tile", onclick: () => go(`#/m/${it.id}`) },
+        h("div", { class: "row1" }, avatar(it.from_name, it.from_addr || it.from_name, "sm"),
+          it.priority === "high" ? h("span", { class: "tag high" }, "High") : h("span", { class: "day" }, fmtDay(when))),
+        h("div", { class: "time" }, fmtTime(when)),
+        h("div", { class: "label" }, it.summary || it.subject));
+    })));
+  }
+  put(card, h("div", { class: "card-foot" },
+    h("button", { class: "link", onclick: () => go(isPhone() ? "#/brief" : "#/") }, "View full brief"),
+    s ? h("span", { class: "small" }, fmtWhen(s.generated_at)) : null));
+  return card;
+}
+
+function triageSwitch(on) {
+  const input = h("input", { type: "checkbox", checked: on, onchange: async (e) => {
+    try {
+      await api("/api/settings/triage", { method: "PUT", body: { auto: e.target.checked } });
+      toast(e.target.checked ? "Auto-triage on: new mail gets sorted for you" : "Auto-triage off");
+      if (e.target.checked) {
+        setTimeout(async () => { await refreshStatus(); $("list-col").dataset.ready = ""; renderSide(); renderList(); }, 4000);
+      }
+    } catch (err) { e.target.checked = !e.target.checked; toast(err.message); }
+  } });
+  return h("label", { class: "switch", title: "Auto-triage" }, input, h("span", { class: "track" }), h("span", { class: "small" }, "Auto-triage"));
+}
+
+function triageWidget() {
+  const st = state.status;
+  const counts = st.unread_by_category || {};
+  const keys = [...Object.keys(st.categories), ...(counts.untriaged ? ["untriaged"] : [])];
+  return h("div", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", {}, icon("tag"), "Categories"), triageSwitch(st.auto_triage)),
+    st.triage_error ? h("div", { class: "error" }, st.triage_error) : null,
+    keys.map((k) => h("div", { class: "row-item clickable", onclick: () => { state.category = k; state.unread = false; navigateList(); } },
+      h("span", { class: "ico" }, icon(CATS[k]?.icon || "folder")),
+      h("div", { class: "grow" }, h("div", { class: "t" }, CATS[k]?.label || k),
+        h("div", { class: "s" }, st.categories[k] || "Waiting for the AI")),
+      counts[k] ? h("span", { class: "tag" + (k === "important" ? " dark" : "") }, `${counts[k]} unread`) : null)),
+    h("div", { class: "card-foot" }, h("span", { class: "small" },
+      st.auto_triage ? "New mail is sorted automatically" : "Turn on to let the AI sort new mail")));
+}
+
+function mailboxesWidget() {
+  const st = state.status;
+  return h("div", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", {}, icon("at"), "Mailboxes"),
+      h("button", { class: "round xs", title: "Add a mailbox", "aria-label": "Add a mailbox", onclick: () => go("#/settings") }, icon("plus"))),
+    st.accounts.length ? st.accounts.map((a) => h("div", { class: "row-item clickable", onclick: () => {
+      state.accountId = state.accountId === String(a.id) ? "" : String(a.id);
+      navigateList();
+    } },
+      avatar(a.name, a.email, "sm"),
+      h("div", { class: "grow" },
+        h("div", { class: "t" }, a.name, h("span", { class: "muted", style: "font-weight:400" }, ` · ${KIND_LABELS[a.kind] || a.kind}`)),
+        a.last_error ? h("div", { class: "s error" }, a.last_error) : h("div", { class: "s" }, `${a.email} · ${fmtAgo(a.last_sync)}`)),
+      a.unread ? h("span", { class: "tag" + (state.accountId === String(a.id) ? " dark" : "") }, a.unread) : null))
+      : h("p", { class: "muted small" }, "No mailbox yet."));
+}
+
+// --- settings -------------------------------------------------------------------------
+async function renderSettings() {
+  const col = $("settings-col");
   let ai, accounts, rules, outlook;
   try {
     [ai, accounts, rules, outlook] = await Promise.all([
       api("/api/settings/ai"), api("/api/accounts"), api("/api/rules"), api("/api/settings/outlook"),
     ]);
   } catch (e) { toast(e.message); return; }
-  $view.replaceChildren(
-    accountsCard(accounts, outlook),
-    aiCard(ai),
-    profileCard(ai.my_name),
-    rulesCard(rules),
-  );
+  col.replaceChildren(h("div", { class: "settings-grid" },
+    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, accountsCard(accounts, outlook), profileCard(ai)),
+    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, aiCard(ai), rulesCard(rules), safetyCard())));
 }
 
 function field(label, input, hint) {
-  return h("label", { class: "field" }, h("span", {}, label), input, hint ? h("div", { class: "muted small" }, hint) : null);
+  return h("label", { class: "field" }, h("span", {}, label), input, hint ? h("div", { class: "hint" }, hint) : null);
 }
 
 function accountsCard(accounts, outlook) {
-  const list = accounts.map((a) => h("div", { class: "row", style: "padding:8px 0;border-top:1px solid var(--border)" },
+  const list = accounts.map((a) => h("div", { class: "row-item" },
+    avatar(a.name, a.email, "sm"),
     h("div", { class: "grow" },
-      h("div", {}, h("b", {}, a.name), " ", h("span", { class: "tag" }, a.kind)),
-      h("div", { class: "muted small" }, a.email, a.last_sync ? ` · sync ${fmtDate(a.last_sync)}` : ""),
-      a.last_error ? h("div", { class: "error" }, a.last_error) : null),
-    h("button", { class: "btn danger", onclick: async () => {
-      if (!confirm(`Retirer ${a.email} de Beseder ? (Rien n'est supprimé dans ta boîte.)`)) return;
-      try { await api(`/api/accounts/${a.id}`, { method: "DELETE" }); viewSettings(); } catch (e) { toast(e.message); }
-    } }, "Retirer")));
+      h("div", { class: "t" }, a.name, h("span", { class: "muted", style: "font-weight:400" }, ` · ${KIND_LABELS[a.kind] || a.kind}`)),
+      a.last_error ? h("div", { class: "s error" }, a.last_error) : h("div", { class: "s" }, `${a.email} · ${fmtAgo(a.last_sync)}`)),
+    h("button", { class: "pill sm", onclick: async () => {
+      if (!confirm(`Remove ${a.email} from Beseder? Nothing is deleted in the mailbox itself.`)) return;
+      try { await api(`/api/accounts/${a.id}`, { method: "DELETE" }); renderSettings(); } catch (e) { toast(e.message); }
+    } }, "Remove")));
 
   const form = h("div");
   const kind = h("select", {},
     h("option", { value: "gmail" }, "Gmail"),
     h("option", { value: "icloud" }, "iCloud"),
     h("option", { value: "outlook" }, "Outlook / Hotmail"),
-    h("option", { value: "imap" }, "Autre (IMAP)"));
+    h("option", { value: "imap" }, "Other (IMAP)"));
   kind.addEventListener("change", () => renderForm());
 
   function renderForm() {
     const k = kind.value;
-    const email = h("input", { type: "email", autocomplete: "off", placeholder: "toi@exemple.com" });
-    const name = h("input", { type: "text", placeholder: "Perso, Pro…" });
+    const email = h("input", { type: "email", autocomplete: "off", placeholder: "you@example.com" });
+    const name = h("input", { type: "text", placeholder: "Personal, Work…" });
     const err = h("div", { class: "error" });
     if (k === "outlook") {
       const clientId = h("input", { type: "text", value: outlook.client_id, placeholder: "xxxxxxxx-xxxx-…" });
-      const btn = h("button", { class: "btn primary" }, "Se connecter avec Microsoft");
+      const btn = h("button", { class: "pill dark sm" }, "Sign in with Microsoft");
       const flowBox = h("div");
       btn.addEventListener("click", async () => {
         err.textContent = "";
         try {
           const f = await api("/api/accounts/outlook/start", { method: "POST",
             body: { email: email.value, name: name.value, client_id: clientId.value } });
-          flowBox.replaceChildren(h("div", { class: "note" },
-            "Ouvre ", h("a", { href: f.verification_uri, target: "_blank", rel: "noopener" }, f.verification_uri),
-            " et saisis ce code :", h("div", { class: "code" }, f.user_code), "En attente de validation…"));
+          flowBox.replaceChildren(h("div", { class: "notice" },
+            "Open ", h("a", { href: f.verification_uri, target: "_blank", rel: "noopener" }, f.verification_uri),
+            " and enter this code:", h("div", { class: "code" }, f.user_code), "Waiting for you to approve…"));
           pollOutlook(f.flow_id, f.interval, flowBox);
         } catch (e) { err.textContent = e.message; }
       });
-      form.replaceChildren(
-        field("Adresse", email), field("Nom affiché", name),
-        field("Client ID Azure", clientId, "Une seule fois : crée une « App registration » gratuite sur portal.azure.com (voir README)."),
-        btn, err, flowBox);
+      form.replaceChildren(field("Address", email), field("Display name", name),
+        field("Azure client ID", clientId, "One-time setup: a free app registration on portal.azure.com (see the README)."),
+        h("div", { class: "btns" }, btn), err, flowBox);
       return;
     }
     const pwd = h("input", { type: "password", autocomplete: "off" });
-    const host = h("input", { type: "text", placeholder: "imap.exemple.com" });
+    const host = h("input", { type: "text", placeholder: "imap.example.com" });
     const port = h("input", { type: "number", value: "993" });
-    const user = h("input", { type: "text", placeholder: "(par défaut : l'adresse)" });
+    const user = h("input", { type: "text", placeholder: "(defaults to the address)" });
     const hints = {
-      gmail: ["Mot de passe d'application Gmail : myaccount.google.com/apppasswords (validation en 2 étapes requise).", "https://myaccount.google.com/apppasswords"],
-      icloud: ["Mot de passe pour app iCloud : account.apple.com > Connexion et sécurité > Mots de passe pour app.", "https://account.apple.com"],
-      imap: ["Mot de passe de la boîte (ou mot de passe d'application si ton fournisseur en propose).", null],
+      gmail: ["Create one at myaccount.google.com/apppasswords (2-Step Verification must be on).", "https://myaccount.google.com/apppasswords"],
+      icloud: ["Create one at account.apple.com › Sign-In and Security › App-Specific Passwords.", "https://account.apple.com"],
+      imap: ["Your mailbox password, or an app password if your provider offers them.", null],
     }[k];
-    const btn = h("button", { class: "btn primary" }, "Ajouter");
+    const btn = h("button", { class: "pill dark sm" }, "Add mailbox");
     btn.addEventListener("click", async () => {
       err.textContent = "";
-      const done = busy(btn, "Test de connexion…");
+      const done = busy(btn, "Testing the connection…");
       try {
         await api("/api/accounts", { method: "POST", body: {
           kind: k, email: email.value, name: name.value, password: pwd.value,
           host: host.value, port: Number(port.value) || 993, username: user.value } });
-        toast("Compte ajouté, synchronisation lancée");
-        viewSettings();
+        toast("Mailbox added, syncing now");
+        $("list-col").dataset.ready = "";
+        renderSettings();
       } catch (e) { err.textContent = e.message; }
       finally { done(); }
     });
     form.replaceChildren(...[
-      field("Adresse", email), field("Nom affiché", name),
-      k === "imap" && field("Serveur IMAP", host),
+      field("Address", email), field("Display name", name),
+      k === "imap" && field("IMAP server", host),
       k === "imap" && field("Port", port),
-      k === "imap" && field("Identifiant", user),
-      field("Mot de passe d'application", pwd, hints[1] ? h("a", { href: hints[1], target: "_blank", rel: "noopener" }, hints[0]) : hints[0]),
-      btn, err].filter(Boolean));
+      k === "imap" && field("Username", user),
+      field(k === "imap" ? "Password" : "App password", pwd,
+        hints[1] ? h("a", { href: hints[1], target: "_blank", rel: "noopener" }, hints[0]) : hints[0]),
+      h("div", { class: "btns" }, btn), err].filter(Boolean));
   }
   renderForm();
 
   return h("div", { class: "card" },
-    h("h2", {}, "Boîtes mail"),
-    accounts.length ? list : h("p", { class: "muted" }, "Aucune boîte pour l'instant."),
-    h("h3", {}, "Ajouter une boîte"),
-    field("Fournisseur", kind),
+    h("h2", {}, "Mailboxes"),
+    accounts.length ? list : h("p", { class: "muted small" }, "No mailbox yet. Add your first one below."),
+    h("h3", { style: "font-size:15px;margin:22px 0 0" }, "Add a mailbox"),
+    field("Provider", kind),
     form);
 }
 
@@ -470,7 +759,7 @@ async function pollOutlook(flowId, interval, box) {
     let r;
     try { r = await api("/api/accounts/outlook/poll", { method: "POST", body: { flow_id: flowId } }); }
     catch (e) { box.replaceChildren(h("div", { class: "error" }, e.message)); return; }
-    if (r.status === "done") { toast("Compte Outlook ajouté"); viewSettings(); return; }
+    if (r.status === "done") { toast("Outlook mailbox added"); $("list-col").dataset.ready = ""; renderSettings(); return; }
     if (r.status === "error") { box.replaceChildren(h("div", { class: "error" }, r.message)); return; }
   }
 }
@@ -479,29 +768,30 @@ function aiCard(ai) {
   const preset = h("select", {}, Object.entries(ai.presets).map(([k, p]) => h("option", { value: k }, p.label)));
   preset.value = ai.preset || "openrouter";
   const baseUrl = h("input", { type: "url", value: ai.base_url });
-  const apiKey = h("input", { type: "password", autocomplete: "off", placeholder: ai.has_key ? "•••••• (enregistrée, laisse vide pour garder)" : "" });
+  const apiKey = h("input", { type: "password", autocomplete: "off", placeholder: ai.has_key ? "•••••• saved (leave empty to keep it)" : "" });
   const dl = h("datalist", { id: "models" });
-  const model = h("input", { type: "text", value: ai.model, list: "models", placeholder: "nom du modèle" });
-  const modelFast = h("input", { type: "text", value: ai.model_fast, list: "models", placeholder: "(optionnel) modèle rapide pour le tri" });
+  const model = h("input", { type: "text", value: ai.model, list: "models", placeholder: "model name" });
+  const modelFast = h("input", { type: "text", value: ai.model_fast, list: "models", placeholder: "(optional) faster model for triage" });
   const command = h("input", { type: "text", value: ai.command || "claude" });
-  const note = h("p", { class: "note" });
+  const note = h("div", { class: "notice" });
   const err = h("div", { class: "error" });
-  const urlField = field("URL de l'API", baseUrl);
-  const keyField = field("Clé API", apiKey);
-  const cmdField = field("Commande", command, "Chemin du binaire claude sur le Pi.");
+  const urlField = field("API URL", baseUrl);
+  const keyField = field("API key", apiKey);
+  const cmdField = field("Command", command, "Path to the claude binary on the Pi (run `which claude`).");
 
   function sync(initial) {
     const p = ai.presets[preset.value];
     note.textContent = p.note || "";
     note.hidden = !p.note;
-    const isCli = p.kind === "claude_cli";
     urlField.hidden = p.kind !== "openai_compat";
-    keyField.hidden = isCli || (!p.needs_key && preset.value !== "custom");
-    cmdField.hidden = !isCli;
-    if (!initial || !ai.preset) {
+    keyField.hidden = p.kind === "claude_cli" || (!p.needs_key && preset.value !== "custom");
+    cmdField.hidden = p.kind !== "claude_cli";
+    if (!initial) {
       baseUrl.value = p.base_url || "";
-      if (!initial) { model.value = p.model || ""; modelFast.value = p.model_fast || ""; }
-      else if (!ai.model) { model.value = p.model || ""; modelFast.value = p.model_fast || ""; }
+      model.value = p.model || "";
+      modelFast.value = p.model_fast || "";
+    } else if (!ai.preset) {
+      baseUrl.value = p.base_url || "";
     }
   }
   preset.addEventListener("change", () => sync(false));
@@ -510,72 +800,108 @@ function aiCard(ai) {
   const form = () => ({ preset: preset.value, base_url: baseUrl.value, model: model.value,
     model_fast: modelFast.value, api_key: apiKey.value, command: command.value });
 
-  const listBtn = h("button", { class: "btn" }, "Lister les modèles");
+  const listBtn = h("button", { class: "pill sm" }, "List models");
   listBtn.addEventListener("click", async () => {
-    const done = busy(listBtn, "Chargement…");
+    err.textContent = "";
+    const done = busy(listBtn, "Loading…");
     try {
       const r = await api("/api/settings/ai/models", { method: "POST", body: form() });
-      dl.replaceChildren(...r.models.map((m) => h("option", { value: m })));
-      toast(`${r.models.length} modèles trouvés. Tape dans le champ pour filtrer (ex. « free »).`);
+      dl.replaceChildren(...r.models.map((x) => h("option", { value: x })));
+      toast(`${r.models.length} models found. Type in the field to filter (e.g. "free").`);
     } catch (e) { err.textContent = e.message; }
     finally { done(); }
   });
-  const saveBtn = h("button", { class: "btn primary" }, "Enregistrer");
+  const saveBtn = h("button", { class: "pill dark sm" }, "Save");
   saveBtn.addEventListener("click", async () => {
     err.textContent = "";
-    try { await api("/api/settings/ai", { method: "PUT", body: form() }); toast("IA enregistrée"); apiKey.value = ""; }
+    try { await api("/api/settings/ai", { method: "PUT", body: form() }); toast("AI settings saved"); apiKey.value = ""; }
     catch (e) { err.textContent = e.message; }
   });
-  const testBtn = h("button", { class: "btn" }, "Tester");
+  const testBtn = h("button", { class: "pill sm" }, "Test");
   testBtn.addEventListener("click", async () => {
     err.textContent = "";
-    const done = busy(testBtn, "Test…");
+    const done = busy(testBtn, "Testing…");
     try {
       await api("/api/settings/ai", { method: "PUT", body: form() });
       apiKey.value = "";
       const r = await api("/api/settings/ai/test", { method: "POST" });
-      toast(`L'IA répond : « ${r.reply} »`);
+      toast(`The AI says: "${r.reply}"`);
     } catch (e) { err.textContent = e.message; }
     finally { done(); }
   });
 
   return h("div", { class: "card" },
-    h("h2", {}, "Intelligence artificielle"),
-    h("p", { class: "muted small" }, "L'IA ne peut ni envoyer ni supprimer de mails : elle lit, trie, résume et propose des brouillons quand tu cliques."),
-    field("Fournisseur", preset), note, urlField, keyField, cmdField,
-    field("Modèle (résumés et brouillons)", model), field("Modèle rapide (tri)", modelFast), dl,
-    h("div", { class: "row" }, listBtn, saveBtn, testBtn), err);
+    h("h2", {}, "AI provider"),
+    h("p", { class: "muted small", style: "margin:0" }, "Free, local or your Claude subscription: pick one, list its models, test it."),
+    field("Provider", preset), note, urlField, keyField, cmdField,
+    field("Model (briefs and drafts)", model), field("Fast model (triage)", modelFast), dl,
+    h("div", { class: "btns" }, listBtn, testBtn, saveBtn), err);
 }
 
-function profileCard(myName) {
-  const name = h("input", { type: "text", value: myName, placeholder: "Prénom Nom" });
+function profileCard(ai) {
+  const name = h("input", { type: "text", value: ai.my_name, placeholder: "First Last" });
+  const lang = h("input", { type: "text", value: ai.summary_language || "English", placeholder: "English" });
   return h("div", { class: "card" },
-    h("h2", {}, "Profil"),
-    field("Ton nom (pour signer les brouillons)", name),
-    h("button", { class: "btn", onclick: async () => {
-      try { await api("/api/settings/profile", { method: "PUT", body: { name: name.value } }); toast("Enregistré"); }
-      catch (e) { toast(e.message); }
-    } }, "Enregistrer"));
+    h("h2", {}, "Profile"),
+    field("Your name", name, "Used to greet you and to sign AI drafts."),
+    field("Brief language", lang, "Drafts always follow the language of the email you reply to."),
+    h("div", { class: "btns" }, h("button", { class: "pill sm", onclick: async () => {
+      try {
+        await api("/api/settings/profile", { method: "PUT", body: { name: name.value, summary_language: lang.value } });
+        toast("Profile saved");
+      } catch (e) { toast(e.message); }
+    } }, "Save")));
 }
 
 function rulesCard(rules) {
   return h("div", { class: "card" },
-    h("h2", {}, "Règles de tri par expéditeur"),
-    h("p", { class: "muted small" }, "Créées quand tu changes la catégorie d'un mail avec « toujours pour cet expéditeur ». Elles passent avant l'IA."),
-    rules.length ? rules.map((r) => h("div", { class: "row", style: "padding:6px 0;border-top:1px solid var(--border)" },
-      h("span", { class: "grow small" }, r.addr, " → ", h("b", {}, CAT_LABELS[r.category] || r.category)),
-      h("button", { class: "btn danger", onclick: async () => {
-        try { await api(`/api/rules/${encodeURIComponent(r.addr)}`, { method: "DELETE" }); viewSettings(); } catch (e) { toast(e.message); }
-      } }, "Supprimer"))) : h("p", { class: "muted" }, "Aucune règle."));
+    h("h2", {}, "Sender rules"),
+    h("p", { class: "muted small", style: "margin:0" }, "Created with the tag button on an email. They run before the AI, so it cannot override them."),
+    rules.length ? rules.map((r) => h("div", { class: "row-item" },
+      h("span", { class: "ico" }, icon(CATS[r.category]?.icon || "tag")),
+      h("div", { class: "grow" }, h("div", { class: "t" }, r.addr), h("div", { class: "s" }, CATS[r.category]?.label || r.category)),
+      h("button", { class: "pill sm", onclick: async () => {
+        try { await api(`/api/rules/${encodeURIComponent(r.addr)}`, { method: "DELETE" }); renderSettings(); } catch (e) { toast(e.message); }
+      } }, "Delete"))) : h("p", { class: "muted small" }, "No rule yet."));
 }
 
-// --- démarrage ----------------------------------------------------------------
+function safetyCard() {
+  return h("div", { class: "card" },
+    h("h2", { style: "display:flex;align-items:center;gap:8px" }, icon("shield"), "What the AI can do"),
+    h("p", { class: "small", style: "margin:6px 0 0;line-height:1.6" },
+      "Read, sort, brief and draft, only when you tap a button (or turn on auto-triage). ",
+      "It has no tools: it cannot send, delete, move or forward anything. ",
+      "Drafts land in your Drafts folder and you send them yourself."));
+}
+
+// --- top bar and startup ----------------------------------------------------------------
+document.querySelectorAll("[data-icon]").forEach((el) => el.prepend(icon(el.dataset.icon)));
+$("back").addEventListener("click", () => (history.length > 1 ? history.back() : go("#/")));
+$("rail-settings").addEventListener("click", () => go("#/settings"));
+$("top-settings").addEventListener("click", () => go("#/settings"));
+$("summarize").addEventListener("click", () => runSummary(null));
+$("sync").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/sync", { method: "POST" });
+    toast(r.started ? "Syncing your mailboxes" : "A sync is already running");
+    $("sync-state").textContent = "Syncing…";
+  } catch (e) { toast(e.message); }
+});
+let searchTimer;
+$("search").addEventListener("input", (e) => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { state.q = e.target.value.trim(); navigateList(); }, 300);
+});
+$("account-filter").addEventListener("change", (e) => { state.accountId = e.target.value; navigateList(); });
+
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 setInterval(async () => {
-  if ((location.hash || "#/") === "#/" && document.visibilityState === "visible") {
-    const before = state.status?.syncing;
-    await refreshStatus();
-    if (before && !state.status?.syncing) viewInbox();
+  if (document.visibilityState !== "visible" || state.view === "settings") return;
+  const wasSyncing = state.status?.syncing;
+  await refreshStatus();
+  if (wasSyncing && !state.status?.syncing) {
+    $("list-col").dataset.ready = "";
+    renderChrome(); renderSide(); renderList();
   }
 }, 15000);
 route();

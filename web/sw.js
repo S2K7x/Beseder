@@ -1,5 +1,5 @@
-// Service worker : met en cache l'interface seulement. Les mails (/api) ne sont jamais mis en cache.
-const CACHE = "beseder-v1";
+// Service worker: caches the app shell only. Emails (/api) are never cached.
+const CACHE = "beseder-v2";
 const SHELL = ["/", "/app.js", "/style.css", "/manifest.webmanifest", "/icon.svg", "/icon-192.png"];
 
 self.addEventListener("install", (e) => {
@@ -15,7 +15,7 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== location.origin || url.pathname.startsWith("/api/")) return;
-  // Réseau d'abord (pour avoir les mises à jour), cache si hors ligne.
+  // Network first (to get updates), cache when offline.
   e.respondWith(
     fetch(e.request)
       .then((r) => {

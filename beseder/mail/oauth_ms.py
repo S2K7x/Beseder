@@ -1,8 +1,8 @@
-"""OAuth Microsoft (Outlook / Hotmail / Live) par « device code ».
+"""Microsoft OAuth (Outlook / Hotmail / Live) with the device code flow.
 
-Outlook.com n'accepte plus les mots de passe en IMAP : il faut un token OAuth.
-Le flux « device code » marche sans serveur public : l'app affiche un code,
-tu le saisis sur microsoft.com/devicelogin depuis n'importe quel appareil.
+Outlook.com no longer accepts passwords over IMAP: an OAuth token is required.
+The device code flow needs no public server: the app shows a code, and you
+enter it at microsoft.com/devicelogin from any device.
 """
 
 import time
@@ -40,7 +40,7 @@ class MicrosoftOAuth:
         r = self.http.post(f"{_base(tenant)}/devicecode", data={"client_id": client_id, "scope": SCOPE})
         data = r.json()
         if r.status_code != 200:
-            raise ValueError(data.get("error_description") or data.get("error") or "Erreur Microsoft")
+            raise ValueError(data.get("error_description") or data.get("error") or "Microsoft error")
         flow_id = uuid.uuid4().hex
         self.pending[flow_id] = PendingFlow(
             client_id=client_id,
@@ -59,13 +59,13 @@ class MicrosoftOAuth:
         }
 
     def poll(self, flow_id: str) -> tuple[str, dict | None, PendingFlow | None]:
-        """Renvoie ("pending"|"done"|"error", tokens|message, flow)."""
+        """Returns ("pending"|"done"|"error", tokens|message, flow)."""
         flow = self.pending.get(flow_id)
         if not flow:
-            return "error", {"message": "Flux inconnu ou expiré"}, None
+            return "error", {"message": "Unknown or expired sign-in flow"}, None
         if time.time() > flow.expires_at:
             self.pending.pop(flow_id, None)
-            return "error", {"message": "Code expiré, recommence"}, None
+            return "error", {"message": "The code expired, please start again"}, None
         r = self.http.post(
             f"{_base(flow.tenant)}/token",
             data={
@@ -82,12 +82,12 @@ class MicrosoftOAuth:
         if err in ("authorization_pending", "slow_down"):
             return "pending", None, flow
         self.pending.pop(flow_id, None)
-        return "error", {"message": data.get("error_description") or err or "Erreur Microsoft"}, None
+        return "error", {"message": data.get("error_description") or err or "Microsoft error"}, None
 
     def access_token(self, account_id: int, secret: dict, save_secret) -> str:
-        """Renvoie un access token valide, en rafraîchissant si besoin.
+        """Returns a valid access token, refreshing it when needed.
 
-        Microsoft fait tourner les refresh tokens : on sauvegarde le nouveau via save_secret.
+        Microsoft rotates refresh tokens: the new one is stored through save_secret.
         """
         cached = self._access.get(account_id)
         if cached and cached[1] - 60 > time.time():
@@ -104,7 +104,7 @@ class MicrosoftOAuth:
         data = r.json()
         if r.status_code != 200:
             raise PermissionError(
-                "Session Microsoft expirée, reconnecte le compte : "
+                "Microsoft session expired, reconnect the account: "
                 + (data.get("error_description") or data.get("error") or "")
             )
         if data.get("refresh_token") and data["refresh_token"] != secret["refresh_token"]:

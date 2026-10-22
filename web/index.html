@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#4f46e5">
+  <meta name="theme-color" content="#eef1f6">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Beseder">
@@ -14,14 +14,40 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header class="topbar">
-    <button id="back" class="icon-btn" hidden aria-label="Retour">‹</button>
-    <h1 id="title">Beseder</h1>
-    <span id="sync-state" class="muted small"></span>
-    <button id="sync" class="icon-btn" aria-label="Synchroniser">⟳</button>
-    <button id="settings" class="icon-btn" aria-label="Réglages">⚙</button>
-  </header>
-  <main id="view"></main>
+  <div class="app" id="app">
+    <nav class="rail" aria-label="Main">
+      <a class="logo" href="#/" aria-label="Beseder home" data-icon="logo"></a>
+      <div class="rail-nav" id="rail-nav"></div>
+      <div class="rail-bottom">
+        <button class="round" id="rail-settings" aria-label="Settings" data-icon="settings"></button>
+        <div class="avatar me" id="me" aria-hidden="true"></div>
+      </div>
+    </nav>
+
+    <header class="top">
+      <button class="round back" id="back" aria-label="Back" data-icon="chevronLeft" hidden></button>
+      <label class="search">
+        <span data-icon="search"></span>
+        <input id="search" type="search" placeholder="Search mail" autocomplete="off">
+        <select id="account-filter" aria-label="Mailbox"></select>
+      </label>
+      <div class="top-actions">
+        <span class="sync-state" id="sync-state"></span>
+        <button class="round" id="sync" aria-label="Sync now" title="Sync now" data-icon="refresh"></button>
+        <button class="round" id="top-settings" aria-label="Settings" title="Settings" data-icon="settings"></button>
+        <button class="pill dark" id="summarize"><span data-icon="sparkles"></span><span>Summarize unread</span></button>
+      </div>
+    </header>
+
+    <main class="main" id="main">
+      <section class="col list-col" id="list-col" aria-label="Messages"></section>
+      <section class="col reader-col" id="reader-col" aria-label="Reader"></section>
+      <aside class="col side-col" id="side-col" aria-label="Assistant"></aside>
+      <section class="col settings-col" id="settings-col" aria-label="Settings" hidden></section>
+    </main>
+  </div>
+
+  <nav class="tabbar" id="tabbar" aria-label="Tabs"></nav>
   <div id="toast" role="status" hidden></div>
   <script src="/app.js"></script>
 </body>

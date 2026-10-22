@@ -6,7 +6,7 @@ from beseder.main import create_app
 
 
 class FakeProvider:
-    """Provider IA de test : renvoie une réponse fixe et garde les prompts reçus."""
+    """Test AI provider: returns a fixed reply and records the prompts it gets."""
 
     def __init__(self, reply="OK"):
         self.reply = reply
@@ -41,21 +41,21 @@ def client(app):
         yield c
 
 
-def add_account(core, email="moi@gmail.com", kind="gmail"):
+def add_account(core, email="me@gmail.com", kind="gmail"):
     with core.db.conn() as c:
         cur = c.execute(
             "INSERT INTO accounts(name, email, kind, host, port, username, secret, created_at)"
             " VALUES(?,?,?,?,?,?,?,datetime('now'))",
-            ("Perso", email, kind, "imap.gmail.com", 993, email, core.vault.encrypt({"password": "x"})),
+            ("Personal", email, kind, "imap.gmail.com", 993, email, core.vault.encrypt({"password": "x"})),
         )
         return cur.lastrowid
 
 
 def add_message(core, account_id, uid, **kw):
     row = {
-        "subject": f"Sujet {uid}", "from_name": "Alice", "from_addr": "alice@exemple.com",
-        "date": f"2026-10-{10 + uid % 10:02d}T10:00:00+00:00", "snippet": "extrait", "body_text": "corps",
-        "seen": 0, "category": None, "message_id": f"<m{uid}@exemple.com>",
+        "subject": f"Subject {uid}", "from_name": "Alice", "from_addr": "alice@example.com",
+        "date": f"2026-10-{10 + uid % 10:02d}T10:00:00+00:00", "snippet": "excerpt", "body_text": "body",
+        "seen": 0, "category": None, "message_id": f"<m{uid}@example.com>",
     }
     row.update(kw)
     with core.db.conn() as c:

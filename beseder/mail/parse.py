@@ -1,4 +1,4 @@
-"""Parsing des mails bruts et nettoyage du HTML."""
+"""Raw message parsing and HTML sanitizing."""
 
 import html as html_lib
 import re
@@ -24,7 +24,7 @@ _ATTRS = {
 
 
 def sanitize_html(raw: str) -> str:
-    """Retire scripts, handlers, formulaires, iframes... Garde la mise en forme."""
+    """Strips scripts, event handlers, forms, iframes... Keeps the formatting."""
     return nh3.clean(
         raw,
         tags=_TAGS,
@@ -122,7 +122,7 @@ def parse_message(raw: bytes, fallback_date: datetime | None = None, headers_onl
 
     snippet = re.sub(r"\s+", " ", text)[:200]
     if headers_only:
-        snippet = "(Message volumineux : seuls les en-têtes ont été importés. Ouvre-le dans ta boîte mail.)"
+        snippet = "(Large message: only the headers were imported. Open it in your mail app.)"
 
     return ParsedMessage(
         message_id=header("message-id"),
