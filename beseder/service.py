@@ -14,6 +14,8 @@ from .mail.oauth_ms import MicrosoftOAuth
 log = logging.getLogger(__name__)
 
 TRIAGE_BACKLOG = 200
+# Read marks are sent to the server in one batch per account, this many seconds after the first.
+SEEN_FLUSH_DELAY = 3
 
 
 class Beseder:
@@ -24,6 +26,7 @@ class Beseder:
         self.mail = MailService(self.db, self.vault, config, oauth)
         self.sync_lock = asyncio.Lock()
         self.status = {"syncing": False, "triage_error": None}
+        self._seen_flush: set[int] = set()
         self._provider: Provider | None = None
         self._provider_key = None
 
@@ -97,19 +100,24 @@ class Beseder:
             ]
         if not rows:
             return 0
+        saved = 0
+
+        def save(batch: dict[int, str]) -> None:
+            nonlocal saved
+            with self.db.conn() as c:
+                c.executemany(
+                    "UPDATE messages SET category=?, category_source='ai' WHERE id=? AND category IS NULL",
+                    [(cat, mid) for mid, cat in batch.items()],
+                )
+            saved += len(batch)
+
         try:
-            result = await triage(self.provider(), rows)
+            await triage(self.provider(), rows, on_batch=save)
             self.status["triage_error"] = None
         except AIError as e:
             self.status["triage_error"] = str(e)
-            return 0
-        with self.db.conn() as c:
-            c.executemany(
-                "UPDATE messages SET category=?, category_source='ai' WHERE id=? AND category IS NULL",
-                [(cat, mid) for mid, cat in result.items()],
-            )
-        self.db.audit("ai_triage", f"{len(result)}/{len(rows)} classified")
-        return len(result)
+        self.db.audit("ai_triage", f"{saved}/{len(rows)} classified")
+        return saved
 
     def set_category(self, message_id: int, category: str, remember_sender: bool) -> None:
         if category not in CATEGORIES:
@@ -131,6 +139,17 @@ class Beseder:
                     " WHERE from_addr=? AND (category_source IS NULL OR category_source!='user')",
                     (category, m["from_addr"]),
                 )
+
+    async def mark_read(self, message_id: int) -> None:
+        account_id = self.mail.queue_seen(message_id)
+        if account_id is None or account_id in self._seen_flush:
+            return  # a flush for this account is already scheduled and will include it
+        self._seen_flush.add(account_id)
+        try:
+            await asyncio.sleep(SEEN_FLUSH_DELAY)
+        finally:
+            self._seen_flush.discard(account_id)
+        await asyncio.to_thread(self.mail.flush_seen, account_id)
 
     # --- sync -----------------------------------------------------------
     async def sync_all(self) -> int:

@@ -109,3 +109,72 @@ def test_build_reply_threads_correctly():
     assert msg["In-Reply-To"] == "<1@example.com>"
     assert msg["References"] == "<0@example.com> <1@example.com>"
     assert build_reply(dict(m, subject="RE: Dinner"), "me@gmail.com", "x")["Subject"] == "RE: Dinner"
+
+
+def test_read_in_beseder_survives_a_sync_before_the_server_knows(core, monkeypatch):
+    acc = add_account(core)
+    server = FakeIMAP({10: raw(10)})
+    monkeypatch.setattr(core.mail, "connect", lambda account: server)
+    core.mail.sync_account(acc)
+    with core.db.conn() as c:
+        mid = c.execute("SELECT id FROM messages").fetchone()[0]
+        c.execute("UPDATE messages SET seen=1 WHERE id=?", (mid,))
+    core.mail.queue_seen(mid)
+    core.mail.sync_account(acc)  # the server still says unread
+    with core.db.conn() as c:
+        assert c.execute("SELECT seen FROM messages").fetchone()[0] == 1
+
+
+def test_read_marks_are_sent_in_one_batch(core, monkeypatch):
+    acc = add_account(core)
+    server = FakeIMAP({10: raw(10), 11: raw(11), 12: raw(12)})
+    monkeypatch.setattr(core.mail, "connect", lambda account: server)
+    core.mail.sync_account(acc)
+    connects = []
+
+    class Writer(FakeIMAP):
+        def select_folder(self, name, readonly=False):
+            return {}
+
+        def add_flags(self, uids, flags):
+            connects.append(sorted(uids))
+
+    monkeypatch.setattr(core.mail, "connect", lambda account: Writer({}))
+    with core.db.conn() as c:
+        for (mid,) in c.execute("SELECT id FROM messages").fetchall():
+            core.mail.queue_seen(mid)
+    core.mail.flush_seen(acc)
+    core.mail.flush_seen(acc)  # nothing left to send
+    assert connects == [[10, 11, 12]]
+
+
+def test_failed_read_marks_are_retried_at_next_sync(core, monkeypatch):
+    acc = add_account(core)
+    server = FakeIMAP({10: raw(10)})
+    monkeypatch.setattr(core.mail, "connect", lambda account: server)
+    core.mail.sync_account(acc)
+    with core.db.conn() as c:
+        mid = c.execute("SELECT id FROM messages").fetchone()[0]
+    core.mail.queue_seen(mid)
+
+    def offline(account):
+        raise OSError("network down")
+
+    monkeypatch.setattr(core.mail, "connect", offline)
+    core.mail.flush_seen(acc)  # fails, keeps the mark
+
+    sent = []
+
+    class Back(FakeIMAP):
+        def select_folder(self, name, readonly=False):
+            return {b"UIDVALIDITY": 1}
+
+        def add_flags(self, uids, flags):
+            sent.append(list(uids))
+            self.seen.update(uids)
+
+    monkeypatch.setattr(core.mail, "connect", lambda account: Back({10: raw(10)}))
+    core.mail.sync_account(acc)
+    assert sent == [[10]]
+    with core.db.conn() as c:
+        assert c.execute("SELECT seen FROM messages").fetchone()[0] == 1

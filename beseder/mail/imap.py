@@ -5,6 +5,7 @@ Nothing else: no sending, no deleting, no moving.
 """
 
 import logging
+import threading
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
@@ -37,6 +38,9 @@ class MailService:
         self.vault = vault
         self.config = config
         self.oauth = oauth or MicrosoftOAuth()
+        # Messages read in Beseder but not yet flagged on the server: account_id -> uids.
+        self._pending_seen: dict[int, set[int]] = {}
+        self._seen_lock = threading.Lock()
 
     # --- connection ---------------------------------------------------
     def _save_secret(self, account_id: int):
@@ -81,6 +85,7 @@ class MailService:
             return 0
         try:
             with self.connect(account) as client:
+                self._send_seen(client, account_id)
                 new = self._sync_inbox(client, account)
             with self.db.conn() as c:
                 c.execute("UPDATE accounts SET last_sync=?, last_error=NULL WHERE id=?", (now_iso(), account_id))
@@ -166,27 +171,55 @@ class MailService:
         if not known:
             return
         flags = client.fetch(known, ["FLAGS"])
+        with self._seen_lock:
+            pending = set(self._pending_seen.get(account_id, ()))
+        gone = [(account_id, uid) for uid in known if uid not in flags]
+        # A message read in Beseder stays read even if the server hasn't heard about it yet.
+        seen = [
+            (int(uid in pending or b"\\Seen" in flags[uid].get(b"FLAGS", ())), account_id, uid)
+            for uid in known if uid in flags
+        ]
         with self.db.conn() as c:
-            for uid in known:
-                if uid not in flags:
-                    c.execute("DELETE FROM messages WHERE account_id=? AND uid=?", (account_id, uid))
-                else:
-                    seen = int(b"\\Seen" in flags[uid].get(b"FLAGS", ()))
-                    c.execute("UPDATE messages SET seen=? WHERE account_id=? AND uid=?", (seen, account_id, uid))
+            c.executemany("DELETE FROM messages WHERE account_id=? AND uid=?", gone)
+            c.executemany("UPDATE messages SET seen=? WHERE account_id=? AND uid=?", seen)
 
     # --- allowed writes -----------------------------------------------
-    def mark_seen(self, message_id: int) -> None:
+    def queue_seen(self, message_id: int) -> int | None:
+        """Remembers that a message was read. flush_seen() tells the server. Returns the account id."""
         with self.db.conn() as c:
             m = c.execute("SELECT account_id, uid FROM messages WHERE id=?", (message_id,)).fetchone()
         if m is None:
+            return None
+        with self._seen_lock:
+            self._pending_seen.setdefault(m["account_id"], set()).add(m["uid"])
+        return m["account_id"]
+
+    def _send_seen(self, client: IMAPClient, account_id: int) -> None:
+        with self._seen_lock:
+            uids = sorted(self._pending_seen.pop(account_id, ()))
+        if not uids:
             return
-        account = self.get_account(m["account_id"])
+        try:
+            client.select_folder("INBOX")
+            client.add_flags(uids, [b"\\Seen"])
+        except Exception:
+            with self._seen_lock:  # keep them for the next attempt (next read or next sync)
+                self._pending_seen.setdefault(account_id, set()).update(uids)
+            raise
+
+    def flush_seen(self, account_id: int) -> None:
+        """Marks every queued message of an account as read on the server, in one connection."""
+        with self._seen_lock:
+            if not self._pending_seen.get(account_id):
+                return
+        account = self.get_account(account_id)
+        if account is None:
+            return
         try:
             with self.connect(account) as client:
-                client.select_folder("INBOX")
-                client.add_flags([m["uid"]], [b"\\Seen"])
+                self._send_seen(client, account_id)
         except (IMAPClientError, OSError, PermissionError) as e:
-            log.warning("Could not mark as read: %s", type(e).__name__)
+            log.warning("Could not mark messages as read, will retry at the next sync: %s", type(e).__name__)
 
     def save_draft(self, message_id: int, body: str) -> str:
         """Adds a reply to the account's Drafts folder. Sends nothing."""

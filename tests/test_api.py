@@ -132,3 +132,52 @@ def test_ollama_points_to_host_inside_docker(tmp_path):
         assert presets["ollama"]["base_url"] == "http://host.docker.internal:11434/v1"
         c.put("/api/settings/ai", json={"preset": "ollama", "model": "llama3.2"})
         assert app.state.core.ai_config().base_url == "http://host.docker.internal:11434/v1"
+
+
+def test_stored_html_is_sanitized_again_on_read(client, core):
+    acc = add_account(core)
+    mid = add_message(core, acc, 1)
+    with core.db.conn() as c:
+        c.execute("UPDATE messages SET body_html=? WHERE id=?",
+                  ('<p>hi</p><svg onload="x()"></svg><a href="javascript:x()">y</a>', mid))
+    html = client.get(f"/api/messages/{mid}").json()["body_html"]
+    assert "<p>hi</p>" in html and "onload" not in html and "javascript:" not in html
+
+
+def test_pagination_keeps_messages_that_share_a_date(client, core):
+    acc = add_account(core)
+    ids = [add_message(core, acc, uid, date="2026-10-20T10:00:00+00:00") for uid in range(1, 8)]
+    seen, before = [], None
+    while True:
+        params = {"limit": 3}
+        if before:
+            params.update(before=before["date"], before_id=before["id"])
+        page = client.get("/api/messages", params=params).json()
+        if not page:
+            break
+        seen += [m["id"] for m in page]
+        before = page[-1]
+    assert sorted(seen) == sorted(ids) and len(seen) == len(set(seen))
+
+
+def test_triage_keeps_batches_done_before_an_ai_failure(client, core, monkeypatch):
+    from beseder.ai.providers import AIError
+
+    acc = add_account(core)
+    ids = [add_message(core, acc, uid) for uid in range(1, 21)]  # 2 batches of 15 + 5
+    calls = {"n": 0}
+
+    def reply(system, user):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise AIError("429: rate limited")
+        return "{" + ",".join(f'"{i}": "other"' for i in ids) + "}"
+
+    monkeypatch.setattr(core, "provider", lambda: FakeProvider(reply))
+    client.put("/api/settings/triage", json={"auto": False})
+    core.db.set_setting("auto_triage", True)
+    r = client.post("/api/triage/run")
+    assert r.status_code == 502 and "rate limited" in r.json()["detail"]
+    with core.db.conn() as c:
+        done = c.execute("SELECT COUNT(*) FROM messages WHERE category='other'").fetchone()[0]
+    assert done == 15

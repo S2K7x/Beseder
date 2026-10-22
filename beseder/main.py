@@ -18,6 +18,7 @@ from .db import now_iso
 from .mail.imap import PRESETS as MAIL_PRESETS
 from .mail.imap import MailService, reply_recipient
 from .mail.oauth_ms import MicrosoftOAuth
+from .mail.parse import sanitize_html
 from .service import Beseder
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -178,7 +179,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     @app.get("/api/messages")
     def list_messages(
         category: str = "", account_id: int | None = None, unread: bool = False, q: str = "",
-        before: str = "", limit: int = 50,
+        before: str = "", before_id: int = 0, limit: int = 50,
     ):
         where, args = [], []
         if category == "untriaged":
@@ -195,15 +196,16 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             where.append("(m.subject LIKE ? OR m.from_name LIKE ? OR m.from_addr LIKE ? OR m.body_text LIKE ?)")
             args += [f"%{q}%"] * 4
         if before:
-            where.append("m.date<?")
-            args.append(before)
+            # Keyset pagination on (date, id): messages sharing a date are neither skipped nor repeated.
+            where.append("(m.date<? OR (m.date=? AND m.id<?))")
+            args += [before, before, before_id or 2**62]
         sql = (
             "SELECT m.id, m.account_id, a.name AS account_name, m.subject, m.from_name, m.from_addr, m.date,"
             " m.snippet, m.seen, m.category, m.category_source FROM messages m JOIN accounts a ON a.id=m.account_id"
         )
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY m.date DESC LIMIT ?"
+        sql += " ORDER BY m.date DESC, m.id DESC LIMIT ?"
         args.append(max(1, min(limit, 200)))
         with core.db.conn() as c:
             return [dict(r) for r in c.execute(sql, args)]
@@ -223,6 +225,8 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     def read_message(message_id: int):
         m = get_message(message_id)
         m["reply_to_display"] = reply_recipient(m)
+        # Sanitized at import too; doing it again here covers mail stored by an older sanitizer.
+        m["body_html"] = sanitize_html(m["body_html"]) if m["body_html"] else ""
         return m
 
     @app.post("/api/messages/{message_id}/read")
@@ -230,7 +234,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         get_message(message_id)
         with core.db.conn() as c:
             c.execute("UPDATE messages SET seen=1 WHERE id=?", (message_id,))
-        spawn(asyncio.to_thread(core.mail.mark_seen, message_id))
+        spawn(core.mark_read(message_id))
         return {"ok": True}
 
     @app.post("/api/messages/{message_id}/category")

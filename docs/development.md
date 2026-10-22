@@ -15,6 +15,19 @@ To start it at boot without Docker, copy `deploy/beseder.service` to
 `/etc/systemd/system/`, adjust `User=` and the paths, then
 `sudo systemctl enable --now beseder`.
 
+## Testing against a real mail server
+
+`tests/test_integration_imap.py` syncs, marks as read and saves drafts against a real IMAP
+server. It is skipped unless you point it at one. A throwaway Dovecot works:
+
+```bash
+docker run -d --name qa-imap -e USER_PASSWORD=qa-pass -p 127.0.0.1:31993:31993 dovecot/dovecot
+BESEDER_TEST_IMAP=127.0.0.1:31993 python -m pytest -q tests/test_integration_imap.py
+```
+
+(If the container exits with "Address family not supported", your machine has no IPv6:
+add `listen = *` to Dovecot's config.)
+
 ## Configuration
 
 All settings are environment variables:

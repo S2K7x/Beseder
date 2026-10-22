@@ -94,13 +94,18 @@ def parse_triage(text: str, allowed_ids: set[int]) -> dict[int, str]:
     return out
 
 
-async def triage(provider: Provider, messages: list[dict]) -> dict[int, str]:
+async def triage(provider: Provider, messages: list[dict], on_batch=None) -> dict[int, str]:
+    """Sorts messages in batches. on_batch(result) runs after each one, so work done before a
+    failure (e.g. a free tier's rate limit) is kept instead of being asked again."""
     result = {}
     for i in range(0, len(messages), TRIAGE_BATCH):
         batch = messages[i : i + TRIAGE_BATCH]
         system, user = triage_prompt(batch)
         text = await provider.complete(system, user, fast=True, max_tokens=800)
-        result.update(parse_triage(text, {m["id"] for m in batch}))
+        found = parse_triage(text, {m["id"] for m in batch})
+        if on_batch:
+            on_batch(found)
+        result.update(found)
     return result
 
 

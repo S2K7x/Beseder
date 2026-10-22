@@ -278,7 +278,7 @@ function renderChrome() {
 }
 
 // --- list column --------------------------------------------------------------------
-async function renderList(before) {
+async function renderList(before, beforeId) {
   const col = $("list-col");
   const st = state.status;
   if (!st) return;
@@ -308,7 +308,7 @@ async function renderList(before) {
   if (state.accountId) params.set("account_id", state.accountId);
   if (state.unread) params.set("unread", "true");
   if (state.q) params.set("q", state.q);
-  if (before) params.set("before", before);
+  if (before) { params.set("before", before); params.set("before_id", beforeId); }
   let rows;
   try { rows = await api("/api/messages?" + params); } catch (e) { toast(e.message); return; }
   const cards = $("cards");
@@ -321,7 +321,7 @@ async function renderList(before) {
   const prio = priorityMap();
   for (const r of rows) cards.append(mailCard(r, prio[r.id]));
   if (rows.length === 50) {
-    cards.after(h("button", { class: "pill more", id: "more", onclick: () => renderList(rows[rows.length - 1].date) }, "Load more"));
+    cards.after(h("button", { class: "pill more", id: "more", onclick: () => renderList(rows[rows.length - 1].date, rows[rows.length - 1].id) }, "Load more"));
   }
   markSelected();
 }
