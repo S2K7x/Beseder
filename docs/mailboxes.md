@@ -155,7 +155,10 @@ Beseder doesn't support Proton for now.
   check every 5 minutes as a safety net. The first sync imports the last 30 days.
 - It marks an email as read when you open it, like any mail app.
 - It saves a draft in your **Drafts** folder when you tap the save arrow.
-- It moves an email out of the inbox when **you** tap Archive or Move (with an Undo).
+- It reads your **Sent** folder (read only, last 30 days at first) to know which emails you
+  already answered and how you write.
+- It moves an email out of the inbox when **you** tap Archive or Move (with an Undo), or
+  every email from a sender when you choose "Archive all from them" after unsubscribing.
   On Gmail, archiving removes the Inbox label, exactly like the Gmail app; other providers
   use their Archive folder, created if missing. The trash is never offered.
 - Emails over 10 MB are imported without their content at first; tap **Load the full

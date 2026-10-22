@@ -84,6 +84,51 @@ class ParsedMessage:
     list_unsubscribe: bool
     truncated: bool
     attachments: list = field(default_factory=list)  # [(idx, filename, content_type, size)]
+    unsub_url: str = ""        # https link from List-Unsubscribe
+    unsub_mailto: str = ""     # mailto: from List-Unsubscribe
+    unsub_one_click: bool = False  # RFC 8058: the link accepts a POST, no page to visit
+    first_to: tuple = ("", "")     # (name, address) of the first recipient
+
+
+def parse_unsubscribe(value: str, post: str) -> tuple[str, str, bool]:
+    """List-Unsubscribe: "<https://...>, <mailto:...>". Only https links are kept."""
+    url = mailto = ""
+    for item in re.findall(r"<([^>]+)>", value or ""):
+        item = re.sub(r"\s+", "", item)
+        low = item.lower()
+        if low.startswith("https://") and not url:
+            url = item[:2000]
+        elif low.startswith("mailto:") and not mailto:
+            mailto = item[:500]
+    one_click = bool(url) and "list-unsubscribe=one-click" in re.sub(r"\s+", "", (post or "").lower())
+    return url, mailto, one_click
+
+
+# Where the quoted part of a reply starts: "On ... wrote:", "Le ... a écrit :", Outlook headers.
+_QUOTE_START = re.compile(
+    r"^(?:on\b.{0,200}\bwrote:?|le\b.{0,200}\ba écrit\s?:?|am\b.{0,200}\bschrieb.{0,40}:"
+    r"|el\b.{0,200}\bescribió:?|-{2,}\s*original message\s*-{2,}|-{2,}\s*message d'origine\s*-{2,}"
+    r"|_{10,}|from:\s.+|de\s?:\s.+@.+)\s*$",
+    re.I,
+)
+
+
+def strip_quoted(text: str) -> str:
+    """Keeps only what the user wrote in a reply: drops the quoted message and ">" lines."""
+    lines = (text or "").replace("\r\n", "\n").split("\n")
+    out = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if _QUOTE_START.match(stripped):
+            break
+        # "On Tue, ... <a@b.c>" sometimes wraps before "wrote:".
+        if stripped.lower().startswith(("on ", "le ")) and i + 1 < len(lines) and \
+                _QUOTE_START.match(f"{stripped} {lines[i + 1].strip()}"):
+            break
+        if stripped.startswith(">"):
+            continue
+        out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
 
 
 # Images embedded in the HTML (logos, signatures) referenced as cid:...
@@ -162,6 +207,7 @@ def parse_message(raw: bytes, fallback_date: datetime | None = None, headers_onl
             return ""
 
     from_pairs = _addr_list(msg, "from")
+    to_pairs = _addr_list(msg, "to")
     from_name, from_addr = from_pairs[0] if from_pairs else ("", "")
 
     try:
@@ -200,7 +246,7 @@ def parse_message(raw: bytes, fallback_date: datetime | None = None, headers_onl
         from_name=from_name,
         from_addr=from_addr.lower(),
         reply_to=_fmt_addrs(_addr_list(msg, "reply-to")),
-        to_addrs=_fmt_addrs(_addr_list(msg, "to")),
+        to_addrs=_fmt_addrs(to_pairs),
         cc_addrs=_fmt_addrs(_addr_list(msg, "cc")),
         date=dt.astimezone(timezone.utc).isoformat(timespec="seconds"),
         snippet=snippet,
@@ -209,4 +255,7 @@ def parse_message(raw: bytes, fallback_date: datetime | None = None, headers_onl
         list_unsubscribe=bool(header("list-unsubscribe")),
         truncated=headers_only,
         attachments=[] if headers_only else list_attachments(msg),
+        first_to=(to_pairs[0][0], to_pairs[0][1].lower()) if to_pairs else ("", ""),
+        **dict(zip(("unsub_url", "unsub_mailto", "unsub_one_click"),
+                   parse_unsubscribe(header("list-unsubscribe"), header("list-unsubscribe-post")))),
     )

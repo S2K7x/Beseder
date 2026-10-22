@@ -44,6 +44,12 @@ Everything (UI, API messages, prompts, docs, comments) is in English.
   dependency). Notifications are decided in `Beseder.notify_new()` after triage.
 - IMAP IDLE: one thread per mailbox (`MailService.watch_inbox`) triggers `sync_one`.
 - `beseder/main.py`: API routes
+- Sent folder: synced read-only (`MailService._sync_sent`, full syncs only) into `sent_messages`;
+  `thread_index` keeps every received Message-ID. Both feed follow-ups (`Beseder.followups()`)
+  and drafts in the user's style (`style_examples`, passed to the AI as a separate data block).
+- `beseder/unsubscribe.py`: one-click unsubscribe, user click only. https only, every resolved
+  address must be public, the connection is pinned to the checked address, no redirects.
+  Keep this guard: the URL comes from an email. Search uses the `messages_fts` FTS5 index.
 - `web/`: the PWA (three columns on desktop, bottom tab bar on phones)
 - The first-run setup assistant is in `web/app.js` (`renderWelcome`); it reuses the guided
   mailbox and AI setup also shown in Settings.

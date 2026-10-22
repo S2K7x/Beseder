@@ -43,6 +43,11 @@ const ICONS = {
   archive: [["rect", 2, 3, 20, 5, 1], ["path", "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"], ["path", "M10 12h4"]],
   folderMove: [["path", "M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1"],
     ["path", "M2 13h10"], ["path", "m9 16 3-3-3-3"]],
+  clock: [["circle", 12, 12, 10], ["path", "M12 6v6l4 2"]],
+  bellOff: [["path", "M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"], ["path", "M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"],
+    ["path", "M10.3 21a1.94 1.94 0 0 0 3.4 0"], ["path", "m2 2 20 20"]],
+  check: [["path", "M20 6 9 17l-5-5"]],
+  send: [["path", "m22 2-7 20-4-9-9-4Z"], ["path", "M22 2 11 13"]],
   paperclip: [["path", "m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"]],
 };
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -243,6 +248,8 @@ const state = {
   unread: false,
   accountId: "",
   q: "",
+  followups: false,  // list column shows "To reply" / "Waiting for a reply"
+  ask: null,         // { question, result } of the last AI search
   selectedId: null,
   view: "inbox",
 };
@@ -294,13 +301,15 @@ function navItems() {
   const counts = state.status?.unread_by_category || {};
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   const listView = state.view === "inbox" || state.view === "message";
+  const follow = state.status?.followups || {};
+  const list = (f) => () => { Object.assign(state, { category: "", unread: false, followups: false, ask: null }, f); navigateList(); };
+  const plain = listView && !state.followups && !state.ask;
   return [
-    { icon: "inbox", label: "Inbox", badge: total, active: listView && !state.category && !state.unread,
-      go: () => { state.category = ""; state.unread = false; navigateList(); } },
-    { icon: "star", label: "Important", badge: counts.important, active: listView && state.category === "important",
-      go: () => { state.category = "important"; state.unread = false; navigateList(); } },
-    { icon: "unread", label: "Unread", active: listView && state.unread && !state.category,
-      go: () => { state.category = ""; state.unread = true; navigateList(); } },
+    { icon: "inbox", label: "Inbox", badge: total, active: plain && !state.category && !state.unread, go: list({}) },
+    { icon: "star", label: "Important", badge: counts.important, active: plain && state.category === "important",
+      go: list({ category: "important" }) },
+    { icon: "unread", label: "Unread", active: plain && state.unread && !state.category, go: list({ unread: true }) },
+    { icon: "clock", label: "Follow-ups", badge: follow.to_reply, active: listView && state.followups, go: list({ followups: true }) },
     { icon: "sparkles", label: "Brief", active: state.view === "brief", go: () => go("#/brief") },
   ];
 }
@@ -321,7 +330,7 @@ function renderChrome() {
   }));
   $("rail-settings").classList.toggle("active", state.view === "settings");
 
-  const tabs = [items[0], items[1], items[3],
+  const tabs = [items[0], items[3], items[4],
     { icon: "settings", label: "Settings", active: state.view === "settings", go: () => go("#/settings") }];
   $("tabbar").replaceChildren(...tabs.map((it) => h("a", { href: "#", class: it.active ? "active" : "",
     onclick: (e) => { e.preventDefault(); it.go(); } }, icon(it.icon), it.label,
@@ -344,6 +353,8 @@ async function renderList(before, beforeId) {
   const col = $("list-col");
   const st = state.status;
   if (!st) return;
+  if (state.followups && !before) return renderFollowups(col);
+  if (state.ask && !before) return renderAsk(col);
   if (!before) {
     col.dataset.ready = "1";
     const counts = st.unread_by_category || {};
@@ -385,6 +396,92 @@ async function renderList(before, beforeId) {
   if (rows.length === 50) {
     cards.after(h("button", { class: "pill more", id: "more", onclick: () => renderList(rows[rows.length - 1].date, rows[rows.length - 1].id) }, "Load more"));
   }
+  markSelected();
+}
+
+// --- follow-ups -------------------------------------------------------------------------
+async function renderFollowups(col) {
+  col.dataset.ready = "1";
+  const st = state.status;
+  const head = h("div", { class: "card list-head" }, h("h2", {}, icon("clock"), "Follow-ups"),
+    h("p", { class: "muted small" }, "Emails waiting for your answer, and what you sent that hasn't been answered yet."));
+  col.replaceChildren(head, h("div", { class: "card empty" }, "Loading…"));
+  let f;
+  try { f = await api("/api/followups"); } catch (e) { toast(e.message); return; }
+  if (!state.followups) return;
+  const done = (kind, id, card) => async (e) => {
+    e.stopPropagation();
+    try {
+      await api("/api/followups/done", { method: "POST", body: { kind, id } });
+      card.remove();
+      toast("Done");
+      refreshStatus().then(() => { renderChrome(); renderSide(); });
+    } catch (err) { toast(err.message); }
+  };
+  const toReply = f.to_reply.map((r) => {
+    const card = mailCard(r);
+    card.append(h("div", { class: "card-actions" },
+      h("button", { class: "pill sm", onclick: (e) => { e.stopPropagation(); go(`#/m/${r.id}`); } }, icon("reply"), "Reply"),
+      h("button", { class: "pill sm", onclick: done("reply", r.id, card) }, icon("check"), "Done")));
+    return card;
+  });
+  const waiting = f.waiting.map((w) => {
+    const days = Math.max(1, Math.round((Date.now() - new Date(w.date)) / 864e5));
+    const subject = /^re\s?:/i.test(w.subject) ? w.subject : `Re: ${w.subject}`;
+    const card = h("article", { class: "card mail-card sent-card" },
+      h("div", { class: "who" }, avatar(w.to_name, w.to_addr),
+        h("div", { class: "who-name" }, h("span", {}, `To ${w.to_name || w.to_addr}`), h("span", {}, `${days} days without an answer`))),
+      h("h3", {}, w.subject || "(no subject)"),
+      w.snippet ? h("div", { class: "snippet" }, w.snippet) : null);
+    card.append(h("div", { class: "card-actions" },
+      h("a", { class: "pill sm", href: `mailto:${encodeURIComponent(w.to_addr)}?subject=${encodeURIComponent(subject)}` },
+        icon("send"), "Nudge"),
+      h("button", { class: "pill sm", onclick: done("waiting", w.id, card) }, icon("check"), "Done")));
+    return card;
+  });
+  const section = (title, sub, cards, empty) => [h("div", { class: "section-title" }, title, h("span", { class: "muted" }, ` · ${sub}`)),
+    cards.length ? cards : h("div", { class: "card empty small" }, empty)];
+  col.replaceChildren();
+  put(col, head,
+    section("To reply", `${f.to_reply.length}`, toReply,
+      st.ai_configured ? (st.auto_triage ? "Nothing waiting for your answer." : "Turn on auto-triage so the AI can spot emails that need an answer.")
+        : "Connect an AI so it can spot emails that need an answer."),
+    section("Waiting for a reply", `${f.waiting.length}`, waiting, "No one owes you an answer."));
+}
+
+// --- AI search ----------------------------------------------------------------------------
+async function runAsk(question) {
+  if (!question) return toast("Type a question in the search box, then tap ✨");
+  const btn = $("ask");
+  const done = busy(btn);
+  Object.assign(state, { followups: false, ask: { question, result: null } });
+  if (isPhone() && state.view !== "inbox") go("#/");
+  renderList();
+  try {
+    const result = await api("/api/search/ask", { method: "POST",
+      body: { question, account_id: state.accountId ? Number(state.accountId) : null } });
+    if (state.ask?.question === question) { state.ask.result = result; renderList(); }
+  } catch (e) { toast(e.message); state.ask = null; renderList(); }
+  finally { done(); }
+}
+
+function renderAsk(col) {
+  col.dataset.ready = "1";
+  const { question, result } = state.ask;
+  const close = h("button", { class: "round xs", title: "Back to the inbox", "aria-label": "Close",
+    onclick: () => { state.ask = null; navigateList(); } }, icon("chevronLeft"));
+  const head = h("div", { class: "card ask-card" },
+    h("div", { class: "card-head" }, h("h2", {}, icon("sparkles"), "Ask your mail"), close),
+    h("p", { class: "q" }, question));
+  if (!result) {
+    put(head, h("p", { class: "muted small" }, "Searching…"));
+    return col.replaceChildren(head);
+  }
+  if (result.answer) put(head, h("p", { class: "overview" }, result.answer));
+  put(head, h("p", { class: "muted small", style: "margin:0" }, !result.items.length ? "No email matches."
+    : result.loose ? "No exact answer: here are the closest emails." : `${result.items.length} email${result.items.length === 1 ? "" : "s"} found`));
+  col.replaceChildren(head, h("div", { id: "cards", style: "display:flex;flex-direction:column;gap:12px" },
+    result.items.map((r) => mailCard(r))));
   markSelected();
 }
 
@@ -572,6 +669,9 @@ async function renderMessage(col, id) {
       h("span", { class: "ico" }, icon("paperclip")),
       h("span", { class: "grow" }, h("span", { class: "t" }, a.filename), h("span", { class: "s" }, fmtSize(a.size)))))) : null;
   const replyBtn = h("button", { class: "pill", onclick: () => composer.draft() }, icon("reply"), "Reply with AI");
+  const unsubBtn = m.unsub_url || m.unsub_mailto ? h("button", { class: "round sm",
+    title: m.unsub_one_click ? "Unsubscribe in one tap" : "Unsubscribe", "aria-label": "Unsubscribe",
+    onclick: () => unsubscribe(m, unsubBtn) }, icon("bellOff")) : null;
 
   col.replaceChildren(h("div", { class: "card reader" },
     h("div", { class: "reader-top" },
@@ -583,7 +683,9 @@ async function renderMessage(col, id) {
       h("h2", {}, m.from_name || m.from_addr),
       h("div", { class: "sub" }, m.from_name ? `${m.from_addr} · ` : "", `to ${m.account_name}`),
       h("div", { class: "subject" }, m.subject || "(no subject)")),
-    h("div", { class: "actions-row" }, replyBtn, archiveBtn, moveBtn, ruleBtn, imgBtn, textBtn),
+    h("div", { class: "actions-row" }, replyBtn, archiveBtn, moveBtn, unsubBtn, ruleBtn, imgBtn, textBtn),
+    m.needs_reply && !m.answered && !m.followup_done ? h("div", { class: "small muted reply-hint" }, icon("clock"),
+      "The AI thinks this email expects an answer from you.") : null,
     movePicker,
     bodyBox,
     files,
@@ -613,6 +715,40 @@ async function moveMessage(m, folder, btn) {
   toast(folder ? `Moved to ${r.folder}` : "Archived", undo);
   refreshStatus().then(() => { renderChrome(); renderSide(); });
   go(!isPhone() && next ? `#/m/${next}` : "#/");
+}
+
+// One tap when the sender supports it (RFC 8058); otherwise their page (or a pre-filled
+// email in your mail app) opens. Then offers to archive everything they sent.
+async function unsubscribe(m, btn) {
+  const done = busy(btn);
+  let r;
+  try { r = await api(`/api/messages/${m.id}/unsubscribe`, { method: "POST" }); }
+  catch (e) { toast(e.message); done(); return; }
+  done();
+  if (!r.done) {
+    if (r.open.startsWith("mailto:")) location.href = r.open;
+    else window.open(r.open, "_blank", "noopener,noreferrer");
+  } else btn.classList.add("on");
+  toast(r.done ? `Unsubscribed from ${r.sender}` : "Finish on the sender's page", { label: "Archive all from them", run: () => archiveSender(r.sender) });
+}
+
+async function archiveSender(addr) {
+  let r;
+  try { r = await api("/api/senders/archive", { method: "POST", body: { addr } }); } catch (e) { toast(e.message); return; }
+  const undo = r.moved.some((x) => x.folder && x.message_ids.length) ? { label: "Undo", run: async () => {
+    try {
+      for (const x of r.moved) {
+        if (x.folder && x.message_ids.length) {
+          await api(`/api/accounts/${x.account_id}/restore`, { method: "POST", body: { folder: x.folder, message_ids: x.message_ids } });
+        }
+      }
+      toast("Back in your inbox");
+      setTimeout(() => { $("list-col").dataset.ready = ""; route(); }, 2500);
+    } catch (e) { toast(e.message); }
+  } } : null;
+  toast(`${r.count} email${r.count === 1 ? "" : "s"} archived`, undo);
+  $("list-col").dataset.ready = "";
+  go("#/");
 }
 
 function emailFrame(html, allowImages) {
@@ -690,7 +826,7 @@ function buildComposer(m) {
 // --- side column ----------------------------------------------------------------------
 function renderSide() {
   if (!state.status) return;
-  $("side-col").replaceChildren(briefWidget(), triageWidget(), mailboxesWidget());
+  $("side-col").replaceChildren(briefWidget(), followupsWidget(), triageWidget(), mailboxesWidget());
 }
 
 function briefWidget() {
@@ -719,6 +855,20 @@ function briefWidget() {
   return card;
 }
 
+function followupsWidget() {
+  const f = state.status.followups || { to_reply: 0, waiting: 0 };
+  const open = () => { Object.assign(state, { followups: true, category: "", unread: false, ask: null }); navigateList(); };
+  const row = (ic, title, sub, n) => h("div", { class: "row-item clickable", onclick: open },
+    h("span", { class: "ico" }, icon(ic)),
+    h("div", { class: "grow" }, h("div", { class: "t" }, title), h("div", { class: "s" }, sub)),
+    n ? h("span", { class: "tag" + (ic === "reply" ? " dark" : "") }, n) : null);
+  return h("div", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", {}, icon("clock"), "Follow-ups"),
+      h("button", { class: "round xs", title: "Open follow-ups", "aria-label": "Open follow-ups", onclick: open }, icon("arrowUpRight"))),
+    row("reply", "To reply", f.to_reply ? "People waiting for your answer" : "You're all caught up", f.to_reply),
+    row("send", "Waiting for a reply", f.waiting ? "Sent, no answer after 2 days" : "No one owes you an answer", f.waiting));
+}
+
 function triageSwitch(on) {
   const input = h("input", { type: "checkbox", checked: on, onchange: async (e) => {
     try {
@@ -739,7 +889,9 @@ function triageWidget() {
   return h("div", { class: "card" },
     h("div", { class: "card-head" }, h("h2", {}, icon("tag"), "Categories"), triageSwitch(st.auto_triage)),
     st.triage_error ? h("div", { class: "error" }, st.triage_error) : null,
-    keys.map((k) => h("div", { class: "row-item clickable", onclick: () => { state.category = k; state.unread = false; navigateList(); } },
+    keys.map((k) => h("div", { class: "row-item clickable", onclick: () => {
+      Object.assign(state, { category: k, unread: false, followups: false, ask: null }); navigateList();
+    } },
       h("span", { class: "ico" }, icon(CATS[k]?.icon || "folder")),
       h("div", { class: "grow" }, h("div", { class: "t" }, CATS[k]?.label || k),
         h("div", { class: "s" }, st.categories[k] || "Waiting for the AI")),
@@ -776,7 +928,7 @@ async function renderSettings() {
   } catch (e) { toast(e.message); return; }
   col.replaceChildren(h("div", { class: "settings-grid" },
     h("div", { style: "display:flex;flex-direction:column;gap:18px" }, accountsCard(accounts, outlook), notificationsCard(), profileCard(ai), setupCard()),
-    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, aiCard(ai), rulesCard(rules), safetyCard())));
+    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, aiCard(ai), assistantCard(), rulesCard(rules), safetyCard())));
 }
 
 function field(label, input, hint) {
@@ -1302,6 +1454,66 @@ function aiCard(ai) {
     h("div", { class: "btns" }, listBtn, testBtn, saveBtn), err);
 }
 
+function assistantCard() {
+  const card = h("div", { class: "card" }, h("h2", {}, "Assistant"), h("p", { class: "muted small" }, "Loading…"));
+  (async () => {
+    let a;
+    try { a = await api("/api/settings/assistant"); } catch (e) { card.replaceChildren(h("h2", {}, "Assistant"), h("div", { class: "error" }, e.message)); return; }
+    const rules = h("textarea", { rows: "4", placeholder: "Emails from my kids' school are important\nShipping updates go to Notifications\nAnything about my car insurance is important" });
+    rules.value = a.rules;
+    const saveRules = h("button", { class: "pill sm" }, "Save rules");
+    saveRules.addEventListener("click", async () => {
+      try {
+        const r = await api("/api/settings/rules", { method: "PUT", body: { rules: rules.value } });
+        rules.value = r.rules.join("\n");
+        toast(r.rules.length ? "Rules saved: they apply to new mail" : "Rules cleared");
+      } catch (e) { toast(e.message); }
+    });
+    const resort = h("button", { class: "pill sm" }, "Re-sort the last 14 days");
+    resort.addEventListener("click", async () => {
+      const done = busy(resort, "Sorting…");
+      try {
+        await api("/api/settings/rules", { method: "PUT", body: { rules: rules.value } });
+        const r = await api("/api/triage/resort", { method: "POST" });
+        toast(`${r.classified} email${r.classified === 1 ? "" : "s"} sorted again`);
+        $("list-col").dataset.ready = "";
+      } catch (e) { toast(e.message); }
+      finally { done(); }
+    });
+    const style = h("input", { type: "checkbox", checked: a.learn_style, onchange: async (e) => {
+      try { await api("/api/settings/style", { method: "PUT", body: { learn: e.target.checked } }); toast("Saved"); }
+      catch (err) { e.target.checked = !e.target.checked; toast(err.message); }
+    } });
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    const on = h("input", { type: "checkbox", checked: !!a.time });
+    const time = h("input", { type: "time", value: a.time || "07:30", disabled: !a.time });
+    const saveBrief = async () => {
+      time.disabled = !on.checked;
+      try {
+        await api("/api/settings/brief", { method: "PUT", body: { time: on.checked ? time.value : "", tz } });
+        toast(on.checked ? `Morning brief every day at ${time.value}` : "Morning brief off");
+      } catch (e) { toast(e.message); }
+    };
+    on.addEventListener("change", saveBrief);
+    time.addEventListener("change", saveBrief);
+    card.replaceChildren();
+    put(card,
+      h("h2", {}, "Assistant"),
+      field("Sorting rules", rules, `In your own words, one per line (up to ${a.max_rules}). The AI follows them when it sorts new mail.`),
+      h("div", { class: "btns" }, saveRules, resort),
+      h("label", { class: "big-switch", style: "margin-top:16px" },
+        h("div", { class: "grow" }, h("div", { class: "t" }, "Write drafts like me"),
+          h("div", { class: "s" }, "The AI looks at a few emails you sent (to the same person first) to match your tone and sign-off.")),
+        h("span", { class: "switch" }, style, h("span", { class: "track" }))),
+      h("label", { class: "big-switch", style: "margin-top:10px" },
+        h("div", { class: "grow" }, h("div", { class: "t" }, "Morning brief"),
+          h("div", { class: "s" }, `Every day, the AI summarizes your unread mail and sends you a notification (${tz}).`)),
+        h("span", { class: "switch" }, on, h("span", { class: "track" }))),
+      field("Time", time));
+  })();
+  return card;
+}
+
 function profileCard(ai) {
   const name = h("input", { type: "text", value: ai.my_name, placeholder: "First Last" });
   const lang = h("input", { type: "text", value: ai.summary_language || "English", placeholder: "English" });
@@ -1354,7 +1566,12 @@ $("sync").addEventListener("click", async () => {
 let searchTimer;
 $("search").addEventListener("input", (e) => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { state.q = e.target.value.trim(); navigateList(); }, 300);
+  searchTimer = setTimeout(() => { state.q = e.target.value.trim(); state.ask = null; state.followups = false; navigateList(); }, 300);
+});
+// Ask in plain language: "how much was my last electricity bill?"
+$("ask").addEventListener("click", () => runAsk($("search").value.trim()));
+$("search").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && /\?\s*$/.test(e.target.value)) { e.preventDefault(); clearTimeout(searchTimer); runAsk(e.target.value.trim()); }
 });
 $("account-filter").addEventListener("change", (e) => { state.accountId = e.target.value; navigateList(); });
 

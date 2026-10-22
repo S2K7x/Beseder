@@ -2,6 +2,8 @@
 
 import asyncio
 import contextlib
+import re
+import sqlite3
 from pathlib import Path
 from urllib.parse import quote
 
@@ -21,6 +23,7 @@ from .mail.imap import LoginRejected, MailService, reply_recipient
 from .mail.oauth_ms import MicrosoftOAuth
 from .mail.parse import sanitize_html
 from .service import Beseder
+from .unsubscribe import UnsubscribeError, one_click
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -94,7 +97,35 @@ class MoveIn(BaseModel):
 
 class RestoreIn(BaseModel):
     folder: str
-    message_id: str
+    message_id: str = ""
+    message_ids: list[str] = []
+
+
+class SenderIn(BaseModel):
+    addr: str
+
+
+class FollowupDoneIn(BaseModel):
+    kind: str  # reply | waiting
+    id: int
+
+
+class RulesIn(BaseModel):
+    rules: str = ""
+
+
+class StyleIn(BaseModel):
+    learn: bool
+
+
+class BriefIn(BaseModel):
+    time: str = ""  # "07:30", empty = off
+    tz: str = "UTC"
+
+
+class AskIn(BaseModel):
+    question: str
+    account_id: int | None = None
 
 
 class PushSubscriptionIn(BaseModel):
@@ -116,6 +147,17 @@ class ProfileIn(BaseModel):
     summary_language: str = "English"
 
 
+LIST_COLUMNS = ("m.id, m.account_id, a.name AS account_name, m.subject, m.from_name, m.from_addr, m.date,"
+                " m.snippet, m.seen, m.category, m.category_source")
+
+
+def fts_query(q: str) -> str | None:
+    """Search box text -> FTS5 query: every word must match the start of a word ("fact"
+    finds "facture"). Accents are ignored by the index. Quotes keep FTS syntax out."""
+    words = re.findall(r"\w+", q)[:8]
+    return " ".join(f'"{w}"*' for w in words) or None
+
+
 def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None) -> FastAPI:
     config = config or Config()
     core = Beseder(config, oauth)
@@ -128,13 +170,14 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
-        task = asyncio.create_task(core.scheduler()) if config.run_scheduler else None
+        tasks_ = [asyncio.create_task(core.scheduler()), asyncio.create_task(core.brief_loop())] \
+            if config.run_scheduler else []
         if config.run_scheduler and config.idle:
             core.start_watchers(asyncio.get_running_loop())
         yield
         core.stop_watchers()
-        if task:
-            task.cancel()
+        for t in tasks_:
+            t.cancel()
 
     app = FastAPI(title="Beseder", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.core = core
@@ -204,8 +247,10 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
                 for r in c.execute("SELECT category, COUNT(*) n FROM messages WHERE seen=0 GROUP BY category")
             }
         cfg = core.ai_config()
+        follow = core.followups()
         return {
             "accounts": accounts,
+            "followups": {"to_reply": len(follow["to_reply"]), "waiting": len(follow["waiting"])},
             "unread_by_category": counts,
             "categories": tasks.CATEGORIES,
             "auto_triage": core.auto_triage,
@@ -237,23 +282,38 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             args.append(account_id)
         if unread:
             where.append("m.seen=0")
-        if q:
+        match = fts_query(q) if q else None
+        if match:
+            where.append("m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
+            args.append(match)
+        elif q:  # only punctuation or symbols: plain substring search
             where.append("(m.subject LIKE ? OR m.from_name LIKE ? OR m.from_addr LIKE ? OR m.body_text LIKE ?)")
             args += [f"%{q}%"] * 4
         if before:
             # Keyset pagination on (date, id): messages sharing a date are neither skipped nor repeated.
             where.append("(m.date<? OR (m.date=? AND m.id<?))")
             args += [before, before, before_id or 2**62]
-        sql = (
-            "SELECT m.id, m.account_id, a.name AS account_name, m.subject, m.from_name, m.from_addr, m.date,"
-            " m.snippet, m.seen, m.category, m.category_source FROM messages m JOIN accounts a ON a.id=m.account_id"
-        )
+        sql = f"SELECT {LIST_COLUMNS} FROM messages m JOIN accounts a ON a.id=m.account_id"
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY m.date DESC, m.id DESC LIMIT ?"
         args.append(max(1, min(limit, 200)))
         with core.db.conn() as c:
-            return [dict(r) for r in c.execute(sql, args)]
+            try:
+                return [dict(r) for r in c.execute(sql, args)]
+            except sqlite3.OperationalError:
+                raise HTTPException(400, "Cannot search for this")
+
+    @app.post("/api/search/ask")
+    async def ask_search(body: AskIn):
+        """Search in plain language: the AI turns the question into a search, then picks the
+        emails that answer it among the results."""
+        if not body.question.strip():
+            raise HTTPException(400, "Ask a question")
+        try:
+            return await core.ask_search(body.question, body.account_id)
+        except AIError as e:
+            ai_error(e)
 
     def get_message(message_id: int) -> dict:
         with core.db.conn() as c:
@@ -320,13 +380,59 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     async def restore_message(account_id: int, body: RestoreIn):
         if core.mail.get_account(account_id) is None:
             raise HTTPException(404, "Mailbox not found")
+        wanted = [body.message_id] if body.message_id else body.message_ids
         try:
-            ok = await asyncio.to_thread(core.mail.restore, account_id, body.folder, body.message_id)
+            n = await asyncio.to_thread(core.mail.restore, account_id, body.folder, wanted)
         except (IMAPClientError, OSError, PermissionError) as e:
             raise HTTPException(502, f"IMAP error: {e}")
-        if not ok:
+        if not n:
             raise HTTPException(404, "Could not find the message to put back")
         spawn(core.sync_one(account_id))
+        return {"ok": True, "restored": n}
+
+    @app.post("/api/senders/archive")
+    async def archive_sender(body: SenderIn):
+        """Archives every email from one sender (Undo puts them back)."""
+        try:
+            done = await core.archive_sender(body.addr.strip())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except (IMAPClientError, OSError, PermissionError) as e:
+            raise HTTPException(502, f"IMAP error: {e}")
+        core.mark_changed()
+        return {"count": sum(len(d["message_ids"]) for d in done), "moved": done}
+
+    @app.post("/api/messages/{message_id}/unsubscribe")
+    async def unsubscribe(message_id: int):
+        """One-click unsubscribe when the sender supports it (RFC 8058). Otherwise returns the
+        link or address for the user to open: Beseder never sends email."""
+        m = get_message(message_id)
+        if m["unsub_one_click"] and m["unsub_url"]:
+            try:
+                await one_click(m["unsub_url"])
+            except UnsubscribeError as e:
+                raise HTTPException(502, str(e))
+            core.db.audit("unsubscribed", f"message={message_id}")
+            return {"done": True, "sender": m["from_addr"]}
+        if m["unsub_url"]:
+            return {"done": False, "open": m["unsub_url"], "sender": m["from_addr"]}
+        if m["unsub_mailto"]:
+            return {"done": False, "open": m["unsub_mailto"], "sender": m["from_addr"]}
+        raise HTTPException(404, "This email has no unsubscribe link")
+
+    # --- follow-ups ---------------------------------------------------------
+    @app.get("/api/followups")
+    def followups():
+        return core.followups()
+
+    @app.post("/api/followups/done")
+    def followup_done(body: FollowupDoneIn):
+        try:
+            core.followup_done(body.kind, body.id)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except LookupError as e:
+            raise HTTPException(404, str(e))
         return {"ok": True}
 
     @app.get("/api/accounts/{account_id}/folders")
@@ -393,7 +499,8 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     async def draft(message_id: int, body: DraftIn):
         m = get_message(message_id)
         try:
-            text = await tasks.draft(core.provider(), m, body.instructions, core.db.get_setting("my_name", ""))
+            text = await tasks.draft(core.provider(), m, body.instructions, core.db.get_setting("my_name", ""),
+                                     core.style_examples(m["from_addr"]))
         except AIError as e:
             ai_error(e)
         core.db.audit("ai_draft", f"message={message_id}")
@@ -415,29 +522,10 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
     # --- AI: summary and triage ------------------------------------------
     @app.post("/api/summary")
     async def summary(body: SummaryIn):
-        sql = "SELECT * FROM messages WHERE seen=0"
-        args: list = []
-        if body.account_id:
-            sql += " AND account_id=?"
-            args.append(body.account_id)
-        sql += " ORDER BY date DESC LIMIT ?"
-        args.append(tasks.SUMMARY_LIMIT)
-        with core.db.conn() as c:
-            rows = [dict(r) for r in c.execute(sql, args)]
         try:
-            language = core.db.get_setting("summary_language", "English") or "English"
-            result = await tasks.summarize(core.provider() if rows else None, rows, language)
+            return await core.make_summary(body.account_id)
         except AIError as e:
             ai_error(e)
-        meta = {r["id"]: r for r in rows}
-        for it in result["items"]:
-            r = meta[it["id"]]
-            it.update(subject=r["subject"], from_name=r["from_name"] or r["from_addr"], date=r["date"], from_addr=r["from_addr"])
-        core.db.audit("ai_summary", f"{len(rows)} messages")
-        result["count"] = len(rows)
-        result["generated_at"] = now_iso()
-        core.db.set_setting("last_summary", result)
-        return result
 
     @app.get("/api/summary/last")
     def last_summary():
@@ -458,6 +546,39 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         if core.status["triage_error"]:
             raise HTTPException(502, core.status["triage_error"])
         return {"classified": n}
+
+    @app.post("/api/triage/resort")
+    async def resort():
+        """Sorts the last 14 days again, e.g. after changing the sorting rules."""
+        n = await core.run_triage(resort=True)
+        if core.status["triage_error"]:
+            raise HTTPException(502, core.status["triage_error"])
+        core.mark_changed()
+        return {"classified": n}
+
+    @app.get("/api/settings/assistant")
+    def assistant_settings():
+        return {"rules": core.db.get_setting("triage_rules", "") or "", "learn_style": core.learn_style,
+                **core.brief_settings(), "max_rules": tasks.MAX_RULES}
+
+    @app.put("/api/settings/rules")
+    def set_rules(body: RulesIn):
+        rules = tasks.clean_rules(body.rules)
+        core.db.set_setting("triage_rules", "\n".join(rules))
+        return {"rules": rules}
+
+    @app.put("/api/settings/style")
+    def set_style(body: StyleIn):
+        core.db.set_setting("learn_style", body.learn)
+        return {"learn_style": body.learn}
+
+    @app.put("/api/settings/brief")
+    def set_brief(body: BriefIn):
+        try:
+            core.set_brief_settings(body.time.strip(), body.tz.strip())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return core.brief_settings()
 
     @app.get("/api/rules")
     def rules():

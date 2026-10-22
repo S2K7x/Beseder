@@ -94,3 +94,31 @@ def test_svg_inline_images_are_not_embedded():
     m.add_alternative(f'<img src="cid:{cid}">', subtype="html")
     m.get_payload()[1].add_related(b"<svg onload='x()'/>", maintype="image", subtype="svg+xml", cid=f"<{cid}>")
     assert "data:image/svg" not in parse_message(m.as_bytes()).body_html
+
+
+def test_unsubscribe_headers():
+    from beseder.mail.parse import parse_unsubscribe
+
+    assert parse_unsubscribe("<mailto:u@x.com?subject=stop>, <https://x.com/u?id=1>", "List-Unsubscribe=One-Click") == (
+        "https://x.com/u?id=1", "mailto:u@x.com?subject=stop", True)
+    assert parse_unsubscribe("<https://x.com/u>", "") == ("https://x.com/u", "", False)
+    # Plain http, javascript: and friends are ignored.
+    assert parse_unsubscribe("<http://x.com/u>, <javascript:alert(1)>", "List-Unsubscribe=One-Click") == ("", "", False)
+    m = EmailMessage()
+    m["From"], m["Subject"] = "News <news@x.com>", "Weekly"
+    m["List-Unsubscribe"] = "<https://x.com/unsub/abc>"
+    m["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+    m.set_content("hi")
+    p = parse_message(m.as_bytes())
+    assert (p.unsub_url, p.unsub_one_click, p.list_unsubscribe) == ("https://x.com/unsub/abc", True, True)
+
+
+def test_strip_quoted_keeps_only_the_new_text():
+    from beseder.mail.parse import strip_quoted
+
+    assert strip_quoted("Sounds good, Tuesday?\n\nSam\n\nOn Mon, 19 Oct 2026, Alice <a@x.com> wrote:\n> Hi") == \
+        "Sounds good, Tuesday?\n\nSam"
+    assert strip_quoted("Ok pour moi\n\nLe lun. 19 oct. 2026 à 09:00, Alice <a@x.com> a écrit :\n> Salut") == "Ok pour moi"
+    assert strip_quoted("Yes\n\n-----Original Message-----\nFrom: Bob") == "Yes"
+    assert strip_quoted("Inline:\n> question?\nanswer") == "Inline:\nanswer"
+    assert strip_quoted("On it\n\nOn Mon, 19 Oct 2026 at 09:00, Alice Martin <alice@example.com>\nwrote:\n> x") == "On it"

@@ -84,6 +84,28 @@ app instead.
 - Is an AI connected? A red message in the Categories card shows the last AI error.
 - Sorting runs after each sync (every 5 minutes). Tap the refresh button to sync now.
 
+## Follow-ups stay empty
+
+- **To reply** needs auto-triage: the AI marks emails that expect an answer while sorting
+  them. Emails sorted before this feature existed aren't marked; new ones will be.
+- **Waiting for a reply** needs your Sent folder. Beseder finds it on its own; if your
+  provider names it oddly, the logs say "Sent folder sync failed". Only emails you sent that
+  ask something (a question mark, "let me know"…) and are 2 to 30 days old show up.
+
+## The morning brief doesn't arrive
+
+- Check Settings › Assistant › Morning brief is on and Settings › Notifications is on for
+  your device (tap **Send a test**).
+- It only runs if you have unread mail and an AI connected, once a day. If Beseder was off
+  at that time, it waits for the next day rather than briefing you hours late.
+
+## Unsubscribe says "refused" or "could not reach"
+
+Beseder only unsubscribes in one tap through public `https` links (see
+[security](security.md#unsubscribing-is-locked-down)). If the sender's server refuses,
+open the email and use the unsubscribe link at the bottom of the message, or mark the sender
+with the tag button so their mail goes to Promotions.
+
 ## I changed a category but the AI keeps changing it back
 
 It won't: a category you set by hand is never overwritten. To file *all* emails from a

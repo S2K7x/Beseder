@@ -258,3 +258,52 @@ def test_idle_ignores_the_echo_of_our_own_writes(env):
     assert fired.wait(10)
     stop.set()
     s.logout()
+
+
+def test_sent_folder_feeds_follow_ups(env):
+    core, client, account_id, user = env
+    s = server(user)
+    question = mail(1, sender="Bob <bob@example.com>", subject="Contract")
+    s.append("INBOX", question)
+    s.append("INBOX", mail(2, sender="Carol <carol@example.com>", subject="Lunch?"))
+    sent_folder = next(name for flags, _sep, name in s.list_folders() if b"\\Sent" in flags)
+    reply = EmailMessage()
+    reply["From"], reply["To"], reply["Subject"] = user, "Bob <bob@example.com>", "Re: Contract"
+    reply["Message-ID"], reply["In-Reply-To"] = "<me-1@example.com>", "<qa-1@example.com>"
+    reply["Date"] = "Tue, 20 Oct 2026 10:00:00 +0000"
+    reply.set_content("Signed, see attached.\n\nOn Tue, Bob <bob@example.com> wrote:\n> please sign")
+    s.append(sent_folder, reply.as_bytes())
+    s.logout()
+
+    core.mail.sync_account(account_id)
+    with core.db.conn() as c:
+        (row,) = c.execute("SELECT * FROM sent_messages").fetchall()
+        c.execute("UPDATE messages SET needs_reply=1, category='important', date=?", (time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),))
+    assert row["to_addr"] == "bob@example.com" and row["body_text"] == "Signed, see attached."
+    assert core.mail.get_account(account_id)["sent_folder"] == sent_folder
+    # Bob's mail was answered from the phone: only Carol's is left to reply to.
+    assert [m["subject"] for m in client.get("/api/followups").json()["to_reply"]] == ["Lunch?"]
+    # The Sent folder is only read.
+    s = server(user)
+    s.select_folder(sent_folder, readonly=True)
+    assert len(s.search("ALL")) == 1
+    s.logout()
+
+
+def test_bulk_archive_and_undo_on_a_real_server(env):
+    core, client, account_id, user = env
+    s = server(user)
+    for i in range(3):
+        s.append("INBOX", mail(i, sender="News <news@shop.com>"))
+    s.append("INBOX", mail(9))
+    core.mail.sync_account(account_id)
+    r = client.post("/api/senders/archive", json={"addr": "news@shop.com"}).json()
+    assert r["count"] == 3
+    s.select_folder("INBOX", readonly=True)
+    assert len(s.search("ALL")) == 1
+    moved = r["moved"][0]
+    assert client.post(f"/api/accounts/{account_id}/restore",
+                       json={"folder": moved["folder"], "message_ids": moved["message_ids"]}).json()["restored"] == 3
+    s.select_folder("INBOX", readonly=True)
+    assert len(s.search("ALL")) == 4
+    s.logout()

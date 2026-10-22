@@ -96,10 +96,29 @@ the full path given by `which claude`.
 Any service with an OpenAI-compatible API works (Groq, Mistral, LM Studio, vLLM…). Choose
 **Other**, enter the API URL (it usually ends in `/v1`) and the key, then load the models.
 
-## Settings worth knowing
+## What the AI does for you
 
+- **Sorting** (the Auto-triage switch in Categories): each new email gets a category. If
+  you correct one with the tag button, that sender always goes there, before the AI is
+  even asked.
+- **Sorting rules** (Settings › Assistant): tell the AI how you want things sorted, in your
+  own words, one rule per line, for example *"Emails from my kids' school are important"* or
+  *"Shipping updates go to Notifications"*. They apply to new mail; tap **Re-sort the last
+  14 days** to apply them to recent mail too (categories you set yourself never change).
+- **Follow-ups** (the clock icon): while sorting, the AI also notes which emails expect an
+  answer from you. They show under **To reply** until you answer (from Beseder's draft or
+  from any other mail app) or tap **Done**. **Waiting for a reply** lists what you sent
+  that asks something and got no answer after 2 days. This needs auto-triage, and reads
+  your **Sent** folder (read only).
+- **Drafts in your style** (Settings › Assistant › Write drafts like me, on by default): the
+  AI sees up to three emails you sent, to the same person first, to copy your greeting,
+  tone and sign-off. Only the text you wrote is used, not the quoted messages.
+- **Morning brief** (Settings › Assistant): pick a time and every day the AI summarizes your
+  unread mail and sends you a notification. Turn on notifications first (Settings ›
+  Notifications). The time follows your device's time zone.
+- **Ask your mail**: type a question in the search box and tap ✨ (or end it with `?` and
+  press Enter): *"when is my dentist appointment?"*. The AI turns it into a search, then
+  picks the emails that answer it. Plain searches (no ✨) don't use the AI at all, ignore
+  accents and match the start of words.
 - **Brief language** (Settings › Profile): the language of your briefs. Drafts always
   follow the language of the email you answer.
-- **Auto-triage** (the switch in Categories): when on, each new email is sorted by the AI.
-  If you correct a category with the tag button, that sender always goes there, before the
-  AI is even asked.

@@ -229,7 +229,7 @@ def test_gmail_archive_removes_the_inbox_label_and_undo_adds_it_back(core, monke
     r = core.mail.move(mid, None)
     assert r == {"folder": "[Gmail]/All Mail", "account_id": acc, "message_id": "<g@x>"}
     assert ("remove_labels", [5], ["\\Inbox"]) in gmail.calls
-    assert core.mail.restore(acc, r["folder"], r["message_id"])
+    assert core.mail.restore(acc, r["folder"], [r["message_id"]]) == 1
     assert ("add_labels", [99], ["\\Inbox"]) in gmail.calls
 
 
@@ -241,4 +241,102 @@ def test_gmail_archive_without_all_mail_has_no_undo(core, monkeypatch):
     monkeypatch.setattr(core.mail, "connect", lambda account: FakeGmail(all_visible=False))
     r = core.mail.move(mid, None)
     assert r["folder"] == ""
-    assert core.mail.restore(acc, r["folder"], r["message_id"]) is False
+    assert core.mail.restore(acc, r["folder"], [r["message_id"]]) == 0
+
+
+def sent_raw(uid, to="Alice <alice@example.com>", body="Can we meet Tuesday?", in_reply_to=""):
+    m = EmailMessage()
+    m["From"] = "Me <me@gmail.com>"
+    m["To"] = to
+    m["Subject"] = f"Plan {uid}"
+    m["Date"] = "Tue, 20 Oct 2026 10:00:00 +0000"
+    m["Message-ID"] = f"<sent{uid}@gmail.com>"
+    if in_reply_to:
+        m["In-Reply-To"] = in_reply_to
+    m.set_content(f"{body}\n\nOn Mon, 19 Oct 2026, Alice <alice@example.com> wrote:\n> secret quoted text")
+    return m.as_bytes()
+
+
+class FakeFolders(FakeIMAP):
+    """INBOX plus a Sent folder flagged \\Sent, both read-only."""
+
+    def __init__(self, inbox, sent, answered=()):
+        super().__init__(inbox)
+        self.folders = {"INBOX": inbox, "Sent Items": sent}
+        self.answered = set(answered)
+        self.current = "INBOX"
+
+    def list_folders(self):
+        return [((b"\\HasNoChildren",), b"/", "INBOX"), ((b"\\Sent",), b"/", "Sent Items"),
+                ((b"\\Trash",), b"/", "Trash")]
+
+    def select_folder(self, name, readonly=False):
+        assert readonly, "sync must open folders read-only"
+        self.current = name
+        self.messages = self.folders[name]
+        return {b"UIDVALIDITY": 1}
+
+    def fetch(self, uids, items):
+        out = super().fetch(uids, items)
+        for u, d in out.items():
+            if self.current == "INBOX" and u in self.answered:
+                d[b"FLAGS"] = d[b"FLAGS"] + (b"\\Answered",)
+        return out
+
+
+def test_sent_folder_sync_threads_and_answered_flag(core, monkeypatch):
+    acc = add_account(core)
+    server = FakeFolders({10: raw(10), 11: raw(11)}, {
+        1: sent_raw(1),
+        2: sent_raw(2, body="Thanks, done.", in_reply_to="<10@example.com>"),
+    }, answered={11})
+    monkeypatch.setattr(core.mail, "connect", lambda account: server)
+    assert core.mail.sync_account(acc) == 2
+    with core.db.conn() as c:
+        sent = {r["uid"]: dict(r) for r in c.execute("SELECT * FROM sent_messages")}
+        threads = {r["message_id"] for r in c.execute("SELECT message_id FROM thread_index")}
+        answered = {r["uid"]: r["answered"] for r in c.execute("SELECT uid, answered FROM messages")}
+        folder = c.execute("SELECT sent_folder, sent_last_uid FROM accounts").fetchone()
+    assert tuple(folder) == ("Sent Items", 2)
+    assert sent[1]["to_addr"] == "alice@example.com" and sent[1]["to_name"] == "Alice"
+    assert sent[1]["body_text"] == "Can we meet Tuesday?"   # quoted text removed
+    assert sent[1]["expects_reply"] == 1 and sent[2]["expects_reply"] == 0
+    assert sent[2]["in_reply_to"] == "<10@example.com>"
+    assert threads == {"<10@example.com>", "<11@example.com>"}
+    assert answered == {10: 0, 11: 1}
+
+    # Incremental: only the new sent message is fetched; quick (IDLE) syncs skip the Sent folder.
+    server.folders["Sent Items"][3] = sent_raw(3)
+    core.mail.sync_account(acc, quick=True)
+    with core.db.conn() as c:
+        assert c.execute("SELECT COUNT(*) FROM sent_messages").fetchone()[0] == 2
+    core.mail.sync_account(acc)
+    with core.db.conn() as c:
+        assert c.execute("SELECT COUNT(*) FROM sent_messages").fetchone()[0] == 3
+
+
+def test_a_broken_sent_folder_never_blocks_the_inbox(core, monkeypatch):
+    acc = add_account(core)
+    server = FakeFolders({10: raw(10)}, {})
+
+    def boom():
+        raise OSError("weird server")
+
+    server.list_folders = boom
+    monkeypatch.setattr(core.mail, "connect", lambda account: server)
+    assert core.mail.sync_account(acc) == 1
+    assert core.mail.get_account(acc)["last_error"] is None
+
+
+def test_bulk_archive_uses_one_connection(core, monkeypatch):
+    from .conftest import add_message
+
+    acc = add_account(core)
+    ids = [add_message(core, acc, u, message_id=f"<b{u}@x>") for u in (5, 6, 7)]
+    gmail = FakeGmail()
+    connects = []
+    monkeypatch.setattr(core.mail, "connect", lambda account: connects.append(1) or gmail)
+    r = core.mail.move_many(acc, ids[:2], None)
+    assert len(connects) == 1 and ("remove_labels", [5, 6], ["\\Inbox"]) in gmail.calls
+    assert sorted(r["message_ids"]) == ["<b5@x>", "<b6@x>"]
+    assert core.mail.restore(acc, r["folder"], r["message_ids"]) == 2

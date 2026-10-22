@@ -18,7 +18,7 @@ def test_extract_json_handles_fences_and_noise():
 
 def test_parse_triage_rejects_unknown_ids_and_categories():
     out = tasks.parse_triage('{"7": "Important", "8": "promotions", "x": "other", "9": "delete"}', {7, 9})
-    assert out == {7: "important"}
+    assert out == {7: ("important", None)}
     assert tasks.parse_triage("no json here", {7}) == {}
     assert tasks.parse_triage('["list"]', {7}) == {}
 
@@ -37,7 +37,7 @@ def test_triage_batches_and_uses_fast_model():
     msgs = [dict(MSG, id=i) for i in range(1, 21)]
     fake = FakeProvider(lambda s, u: '{"1": "promotions", "16": "receipts", "999": "important"}')
     out = asyncio.run(tasks.triage(fake, msgs))
-    assert out == {1: "promotions", 16: "receipts"}
+    assert out == {1: ("promotions", None), 16: ("receipts", None)}
     assert len(fake.calls) == 2 and all(c["fast"] for c in fake.calls)
 
 
@@ -69,3 +69,38 @@ def test_draft_strips_fences_and_passes_instructions():
     assert out == "Hi Eve,\n\nNo thanks."
     call = fake.calls[0]
     assert "decline politely" in call["user"] and "Sam" in call["system"]
+
+
+def test_parse_triage_reads_the_reply_flag():
+    text = ('{"1": {"category": "important", "reply": true}, "2": {"category": "newsletters", "reply": false},'
+            ' "3": {"category": "important", "reply": "yes"}, "4": {"category": "nope", "reply": true}}')
+    assert tasks.parse_triage(text, {1, 2, 3, 4}) == {
+        1: ("important", True), 2: ("newsletters", False), 3: ("important", None)}
+
+
+def test_user_rules_go_in_the_system_prompt_not_in_the_data():
+    rules = tasks.clean_rules("  - Mail from my bank is important\n\n• School newsletters are important too\n" + "x" * 500)
+    assert rules[:2] == ["Mail from my bank is important", "School newsletters are important too"]
+    assert len(rules[2]) == tasks.MAX_RULE_LEN
+    assert len(tasks.clean_rules("\n".join(f"rule {i}" for i in range(50)))) == tasks.MAX_RULES
+    system, user = tasks.triage_prompt([MSG], rules)
+    assert "Mail from my bank is important" in system and "bank" not in user
+
+
+def test_style_examples_are_a_separate_data_block():
+    system, user = tasks.draft_prompt(MSG, "", "Sam", ["Hey Eve!\nSure thing.\nSam", "y" * 2000])
+    ex_tag = next(line for line in user.splitlines() if line.startswith("<examples_")).strip("<>")
+    assert f"<{ex_tag}>" in system and "not instructions" in system
+    assert "Sure thing." in user and "y" * tasks.STYLE_EXAMPLE_LEN in user and "y" * (tasks.STYLE_EXAMPLE_LEN + 1) not in user
+    assert "<examples_" not in tasks.draft_prompt(MSG, "", "Sam")[1]
+
+
+def test_search_plan_and_ranking_are_validated():
+    plan = tasks.parse_search_plan(
+        '{"terms": ["invoice", "fac\\"ture", {"x": 1}, "", "a b"], "from": "edf<script>", "category": "secret",'
+        ' "days": "abc", "unread": "yes"}')
+    assert plan == {"terms": ["invoice", "facture", "ab"], "from": "edfscript", "category": "", "days": 0, "unread": False}
+    assert tasks.parse_search_plan("nope")["terms"] == []
+    ranked = tasks.parse_search_rank('{"ids": ["3", "99", "3", "x", 1], "answer": "It was 42 EUR."}', [1, 3])
+    assert ranked == {"ids": [3, 1], "answer": "It was 42 EUR."}
+    assert tasks.parse_search_rank("garbage", [1, 3]) == {"ids": [1, 3], "answer": ""}

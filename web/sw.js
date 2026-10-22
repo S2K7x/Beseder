@@ -1,5 +1,5 @@
 // Service worker: caches the app shell (never emails) and shows push notifications.
-const CACHE = "beseder-v3";
+const CACHE = "beseder-v4";
 const SHELL = ["/", "/app.js", "/style.css", "/manifest.webmanifest", "/icon.svg", "/icon-192.png"];
 
 self.addEventListener("install", (e) => {

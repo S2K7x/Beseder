@@ -93,7 +93,73 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
 MIGRATIONS = [
     # 1 = nothing to notify about (everything imported before notifications existed).
     ("messages", "notified", "INTEGER NOT NULL DEFAULT 1"),
+    # Follow-ups: does it expect an answer from me (AI, NULL = unknown), did I answer, did I dismiss it.
+    ("messages", "needs_reply", "INTEGER"),
+    ("messages", "answered", "INTEGER NOT NULL DEFAULT 0"),
+    ("messages", "followup_done", "INTEGER NOT NULL DEFAULT 0"),
+    # One-tap unsubscribe (List-Unsubscribe and RFC 8058 List-Unsubscribe-Post headers).
+    ("messages", "unsub_url", "TEXT NOT NULL DEFAULT ''"),
+    ("messages", "unsub_mailto", "TEXT NOT NULL DEFAULT ''"),
+    ("messages", "unsub_one_click", "INTEGER NOT NULL DEFAULT 0"),
+    # Sent folder sync.
+    ("accounts", "sent_folder", "TEXT"),
+    ("accounts", "sent_uidvalidity", "INTEGER"),
+    ("accounts", "sent_last_uid", "INTEGER NOT NULL DEFAULT 0"),
 ]
+
+# Created after the migrations (they use the columns above).
+LATE_SCHEMA = """
+-- What the user sent (Sent folder): to know what was answered, and how the user writes.
+CREATE TABLE IF NOT EXISTS sent_messages (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    uid INTEGER NOT NULL,
+    message_id TEXT NOT NULL DEFAULT '',
+    in_reply_to TEXT NOT NULL DEFAULT '',
+    refs TEXT NOT NULL DEFAULT '',
+    to_addr TEXT NOT NULL DEFAULT '',     -- first recipient, lower case
+    to_name TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    date TEXT NOT NULL,
+    body_text TEXT NOT NULL DEFAULT '',   -- the user's own words, quoted text removed
+    expects_reply INTEGER,                -- NULL = unknown
+    done INTEGER NOT NULL DEFAULT 0,      -- dismissed from "Waiting for a reply"
+    UNIQUE(account_id, uid)
+);
+CREATE INDEX IF NOT EXISTS idx_sent_date ON sent_messages(date DESC);
+CREATE INDEX IF NOT EXISTS idx_sent_reply ON sent_messages(in_reply_to);
+
+-- Message-IDs of every received message, kept after archiving, to see who answered what.
+CREATE TABLE IF NOT EXISTS thread_index (
+    message_id TEXT PRIMARY KEY,
+    in_reply_to TEXT NOT NULL DEFAULT '',
+    refs TEXT NOT NULL DEFAULT '',
+    date TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_thread_reply ON thread_index(in_reply_to);
+CREATE INDEX IF NOT EXISTS idx_thread_date ON thread_index(date);
+CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(from_addr, date);
+
+-- Full-text search (accents ignored), kept in sync by triggers.
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    subject, from_name, from_addr, body_text,
+    content='messages', content_rowid='id', tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, subject, from_name, from_addr, body_text)
+    VALUES (new.id, new.subject, new.from_name, new.from_addr, new.body_text);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_addr, body_text)
+    VALUES ('delete', old.id, old.subject, old.from_name, old.from_addr, old.body_text);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF subject, from_name, from_addr, body_text ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_addr, body_text)
+    VALUES ('delete', old.id, old.subject, old.from_name, old.from_addr, old.body_text);
+    INSERT INTO messages_fts(rowid, subject, from_name, from_addr, body_text)
+    VALUES (new.id, new.subject, new.from_name, new.from_addr, new.body_text);
+END;
+"""
 
 
 def now_iso() -> str:
@@ -111,6 +177,14 @@ class DB:
                 existing = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
                 if column not in existing:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            c.executescript(LATE_SCHEMA)
+            # One-time backfills for databases created before these tables existed.
+            if not c.execute("SELECT 1 FROM settings WHERE key='fts_built'").fetchone():
+                c.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+                c.execute("INSERT OR IGNORE INTO thread_index(message_id, in_reply_to, refs, date)"
+                          " SELECT message_id, COALESCE(in_reply_to, ''), COALESCE(refs, ''), date FROM messages"
+                          " WHERE message_id IS NOT NULL AND message_id != ''")
+                c.execute("INSERT INTO settings(key, value) VALUES('fts_built', 'true')")
 
     @contextmanager
     def conn(self):

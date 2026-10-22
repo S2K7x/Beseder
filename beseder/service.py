@@ -1,10 +1,15 @@
-"""Application logic: AI config, triage, periodic sync."""
+"""Application logic: AI config, triage, follow-ups, briefs, periodic sync."""
 
 import asyncio
 import logging
+import re
+import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .ai import tasks
 from .ai.providers import AIConfig, AIError, Provider, make_provider, presets_for
 from .ai.tasks import CATEGORIES, triage
 from .config import Config
@@ -18,6 +23,15 @@ from .push import PushService
 log = logging.getLogger(__name__)
 
 TRIAGE_BACKLOG = 200
+RESORT_DAYS = 14
+# Follow-ups: "To reply" looks at the last 14 days; "Waiting" at what you sent 2 to 30 days ago.
+TO_REPLY_DAYS = 14
+WAITING_MIN_DAYS = 2
+WAITING_MAX_DAYS = 30
+NO_REPLY = re.compile(r"(^|[._+-])(no-?reply|do-?not-?reply|ne-?pas-?repondre|notifications?|mailer-daemon|bounce)", re.I)
+FOLLOWUPS_TTL = 60  # seconds; also refreshed after each sync, triage or "Done"
+# The morning brief is skipped if Beseder was off for more than this after the chosen time.
+BRIEF_GRACE = timedelta(hours=3)
 # Read marks are sent to the server in one batch per account, this many seconds after the first.
 SEEN_FLUSH_DELAY = 3
 
@@ -37,6 +51,7 @@ class Beseder:
         self._sync_soon: set[int] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._changed = asyncio.Event()
+        self._followups: tuple[float, dict] | None = None
         self._provider: Provider | None = None
         self._provider_key = None
 
@@ -95,34 +110,46 @@ class Beseder:
             )
             return cur.rowcount
 
-    async def run_triage(self) -> int:
+    def triage_rules(self) -> list[str]:
+        return tasks.clean_rules(self.db.get_setting("triage_rules", "") or "")
+
+    async def run_triage(self, resort: bool = False) -> int:
+        """Sorts new mail. resort=True sorts the last 14 days again (after the rules changed),
+        except what the user or a sender rule filed."""
         self.apply_sender_rules()
-        if not self.auto_triage:
+        if not self.auto_triage and not resort:
             return 0
+        if resort:
+            since = (datetime.now(timezone.utc) - timedelta(days=RESORT_DAYS)).isoformat(timespec="seconds")
+            which, args = "(category IS NULL OR category_source='ai') AND date>=?", (since,)
+        else:
+            which, args = "category IS NULL", ()
         with self.db.conn() as c:
             rows = [
                 dict(r)
                 for r in c.execute(
                     "SELECT id, from_name, from_addr, subject, list_unsubscribe, snippet, body_text"
-                    " FROM messages WHERE category IS NULL ORDER BY date DESC LIMIT ?",
-                    (TRIAGE_BACKLOG,),
+                    f" FROM messages WHERE {which} ORDER BY date DESC LIMIT ?",
+                    (*args, TRIAGE_BACKLOG),
                 )
             ]
         if not rows:
             return 0
         saved = 0
 
-        def save(batch: dict[int, str]) -> None:
+        def save(batch: dict[int, tuple[str, bool | None]]) -> None:
             nonlocal saved
             with self.db.conn() as c:
                 c.executemany(
-                    "UPDATE messages SET category=?, category_source='ai' WHERE id=? AND category IS NULL",
-                    [(cat, mid) for mid, cat in batch.items()],
+                    "UPDATE messages SET category=?, category_source='ai', needs_reply=COALESCE(?, needs_reply)"
+                    " WHERE id=? AND (category IS NULL OR category_source='ai')",
+                    [(cat, None if reply is None else int(reply), mid) for mid, (cat, reply) in batch.items()],
                 )
             saved += len(batch)
+            self._followups = None
 
         try:
-            await triage(self.provider(), rows, on_batch=save)
+            await triage(self.provider(), rows, on_batch=save, rules=self.triage_rules())
             self.status["triage_error"] = None
         except AIError as e:
             self.status["triage_error"] = str(e)
@@ -161,6 +188,231 @@ class Beseder:
             self._seen_flush.discard(account_id)
         await asyncio.to_thread(self.mail.flush_seen, account_id)
 
+    # --- follow-ups -------------------------------------------------------
+    def followups(self) -> dict:
+        cached = self._followups
+        if cached and time.monotonic() - cached[0] < FOLLOWUPS_TTL:
+            return cached[1]
+        result = self._compute_followups()
+        self._followups = (time.monotonic(), result)
+        return result
+
+    def _compute_followups(self, limit: int = 50) -> dict:
+        """To reply: mail the AI flagged as expecting an answer, not answered yet.
+        Waiting: what you sent that asks something, with no answer after 2 days."""
+        now = datetime.now(timezone.utc)
+        iso = lambda d: (now - timedelta(days=d)).isoformat(timespec="seconds")  # noqa: E731
+        with self.db.conn() as c:
+            to_reply = [dict(r) for r in c.execute(
+                "SELECT m.id, m.account_id, a.name AS account_name, m.subject, m.from_name, m.from_addr, m.date,"
+                " m.snippet, m.seen, m.category FROM messages m JOIN accounts a ON a.id=m.account_id"
+                " WHERE m.needs_reply=1 AND m.answered=0 AND m.followup_done=0 AND m.date>=?"
+                " AND (m.category IS NULL OR m.category IN ('important', 'other'))"
+                " AND NOT (COALESCE(m.message_id, '')!='' AND (EXISTS (SELECT 1 FROM sent_messages s"
+                "   WHERE s.in_reply_to=m.message_id) OR EXISTS (SELECT 1 FROM sent_messages s"
+                "   WHERE s.date>=m.date AND instr(s.refs, m.message_id)>0)))"
+                " ORDER BY m.date DESC LIMIT ?", (iso(TO_REPLY_DAYS), limit))]
+            sent = [dict(r) for r in c.execute(
+                "SELECT s.id, s.account_id, a.name AS account_name, a.email AS account_email, s.message_id,"
+                " s.to_addr, s.to_name, s.subject, s.date, s.done, substr(s.body_text, 1, 200) AS snippet"
+                " FROM sent_messages s JOIN accounts a ON a.id=s.account_id"
+                " WHERE s.expects_reply=1 AND s.date<=? AND s.date>=? AND s.to_addr!=''"
+                " ORDER BY s.date DESC", (iso(WAITING_MIN_DAYS), iso(WAITING_MAX_DAYS)))]
+            waiting, seen_threads = [], set()
+            for s in sent:
+                local = s["to_addr"].split("@")[0]
+                thread = (s["to_addr"], re.sub(r"^\s*((re|fwd?|tr)\s*:\s*)+", "", s["subject"], flags=re.I).lower())
+                if NO_REPLY.search(local) or s["to_addr"] == s["account_email"].lower() or thread in seen_threads:
+                    continue
+                seen_threads.add(thread)  # only the latest message of a conversation counts
+                if s["done"]:
+                    continue
+                answered = c.execute(
+                    "SELECT 1 FROM messages WHERE from_addr=? AND date>? LIMIT 1", (s["to_addr"], s["date"])
+                ).fetchone() or (s["message_id"] and c.execute(
+                    "SELECT 1 FROM thread_index WHERE in_reply_to=? OR (date>? AND instr(refs, ?)>0) LIMIT 1",
+                    (s["message_id"], s["date"], s["message_id"])).fetchone())
+                if not answered:
+                    waiting.append({k: v for k, v in s.items() if k not in ("account_email", "message_id", "done")})
+                if len(waiting) >= limit:
+                    break
+        return {"to_reply": to_reply, "waiting": waiting}
+
+    def followup_done(self, kind: str, item_id: int) -> None:
+        table = {"reply": ("messages", "followup_done"), "waiting": ("sent_messages", "done")}.get(kind)
+        if table is None:
+            raise ValueError("Unknown follow-up")
+        with self.db.conn() as c:
+            if c.execute(f"UPDATE {table[0]} SET {table[1]}=1 WHERE id=?", (item_id,)).rowcount == 0:
+                raise LookupError("Not found")
+        self._followups = None
+
+    # --- writing style ----------------------------------------------------
+    @property
+    def learn_style(self) -> bool:
+        return bool(self.db.get_setting("learn_style", True))
+
+    def style_examples(self, to_addr: str) -> list[str]:
+        """A few emails the user sent, to this person first: the AI copies the tone, not the content."""
+        if not self.learn_style:
+            return []
+        n = tasks.STYLE_EXAMPLES
+        with self.db.conn() as c:
+            rows = [r[0] for r in c.execute(
+                "SELECT body_text FROM sent_messages WHERE to_addr=? AND length(body_text)>=20"
+                " ORDER BY date DESC LIMIT ?", (to_addr.lower(), n))]
+            if len(rows) < n:
+                rows += [r[0] for r in c.execute(
+                    "SELECT body_text FROM sent_messages WHERE to_addr!=? AND length(body_text)>=20"
+                    " ORDER BY date DESC LIMIT ?", (to_addr.lower(), n - len(rows)))]
+        return [r[: tasks.STYLE_EXAMPLE_LEN] for r in rows]
+
+    # --- briefs -----------------------------------------------------------
+    async def make_summary(self, account_id: int | None = None) -> dict:
+        sql = "SELECT * FROM messages WHERE seen=0"
+        args: list = []
+        if account_id:
+            sql += " AND account_id=?"
+            args.append(account_id)
+        sql += " ORDER BY date DESC LIMIT ?"
+        args.append(tasks.SUMMARY_LIMIT)
+        with self.db.conn() as c:
+            rows = [dict(r) for r in c.execute(sql, args)]
+        language = self.db.get_setting("summary_language", "English") or "English"
+        result = await tasks.summarize(self.provider() if rows else None, rows, language)
+        meta = {r["id"]: r for r in rows}
+        for it in result["items"]:
+            r = meta[it["id"]]
+            it.update(subject=r["subject"], from_name=r["from_name"] or r["from_addr"], date=r["date"],
+                      from_addr=r["from_addr"])
+        self.db.audit("ai_summary", f"{len(rows)} messages")
+        result["count"] = len(rows)
+        result["generated_at"] = now_iso()
+        self.db.set_setting("last_summary", result)
+        return result
+
+    def brief_settings(self) -> dict:
+        return {"time": self.db.get_setting("brief_time", ""), "tz": self.db.get_setting("brief_tz", "UTC")}
+
+    def set_brief_settings(self, time: str, tz: str) -> None:
+        if time and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", time):
+            raise ValueError("Pick a time like 07:30")
+        try:
+            zone = ZoneInfo(tz or "UTC")
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("Unknown time zone")
+        self.db.set_setting("brief_time", time)
+        self.db.set_setting("brief_tz", tz or "UTC")
+        if time:  # already past today's time: start tomorrow rather than right now
+            local = datetime.now(zone)
+            if local.strftime("%H:%M") >= time:
+                self.db.set_setting("brief_last_day", local.date().isoformat())
+
+    async def morning_brief(self, now: datetime | None = None) -> bool:
+        """Runs the brief once a day at the chosen time and sends it as a notification."""
+        cfg = self.brief_settings()
+        if not cfg["time"]:
+            return False
+        try:
+            zone = ZoneInfo(cfg["tz"])
+        except (ZoneInfoNotFoundError, ValueError):
+            zone = timezone.utc
+        local = (now or datetime.now(timezone.utc)).astimezone(zone)
+        hh, mm = (int(x) for x in cfg["time"].split(":"))
+        due = local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        today = local.date().isoformat()
+        if local < due or self.db.get_setting("brief_last_day") == today:
+            return False
+        self.db.set_setting("brief_last_day", today)
+        if local - due > BRIEF_GRACE or not self.ai_config().configured:
+            return False
+        with self.db.conn() as c:
+            if not c.execute("SELECT 1 FROM messages WHERE seen=0 LIMIT 1").fetchone():
+                return False
+        result = await self.make_summary()
+        if self.push.count():
+            preview = self.db.get_setting("push_preview", True)
+            n = result["count"]
+            await self.push.send({
+                "title": "Your morning brief",
+                "body": result["overview"][:180] if preview else f"{n} unread email{'s' if n != 1 else ''} summarized",
+                "url": "/#/brief", "tag": "brief",
+            })
+        return True
+
+    async def brief_loop(self) -> None:
+        while True:
+            try:
+                await self.morning_brief()
+            except AIError as e:
+                log.warning("Morning brief failed: %s", e)
+            except Exception:
+                log.exception("Morning brief failed")
+            await asyncio.sleep(60)
+
+    # --- search -----------------------------------------------------------
+    async def ask_search(self, question: str, account_id: int | None = None) -> dict:
+        provider = self.provider()
+        system, user = tasks.search_plan_prompt(question, datetime.now(timezone.utc).date().isoformat())
+        plan = tasks.parse_search_plan(await provider.complete(system, user, fast=True, max_tokens=300))
+        where, args = [], []
+        if plan["terms"]:
+            where.append("messages_fts MATCH ?")
+            args.append(" OR ".join(f'"{t}"*' for t in plan["terms"]))
+        if plan["from"]:
+            where.append("(m.from_name LIKE ? OR m.from_addr LIKE ?)")
+            args += [f"%{plan['from']}%"] * 2
+        if plan["category"]:
+            where.append("m.category=?")
+            args.append(plan["category"])
+        if plan["days"]:
+            where.append("m.date>=?")
+            args.append((datetime.now(timezone.utc) - timedelta(days=plan["days"])).isoformat(timespec="seconds"))
+        if plan["unread"]:
+            where.append("m.seen=0")
+        if account_id:
+            where.append("m.account_id=?")
+            args.append(account_id)
+        sql = ("SELECT m.id, m.account_id, a.name AS account_name, m.subject, m.from_name, m.from_addr, m.date,"
+               " m.snippet, m.seen, m.category, m.category_source, m.body_text FROM messages m"
+               " JOIN accounts a ON a.id=m.account_id")
+        if plan["terms"]:
+            sql += " JOIN messages_fts ON messages_fts.rowid=m.id"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY " + ("messages_fts.rank" if plan["terms"] else "m.date DESC") + " LIMIT ?"
+        args.append(tasks.ASK_LIMIT)
+        with self.db.conn() as c:
+            try:
+                rows = [dict(r) for r in c.execute(sql, args)]
+            except sqlite3.OperationalError:  # a term FTS can't parse: no result rather than an error
+                rows = []
+        self.db.audit("ai_search", f"{len(rows)} candidates")
+        if not rows:
+            return {"items": [], "answer": "", "loose": False}
+        system, user = tasks.search_rank_prompt(question, rows)
+        ranked = tasks.parse_search_rank(await provider.complete(system, user, max_tokens=600), [r["id"] for r in rows])
+        by_id = {r["id"]: r for r in rows}
+        items, loose = [by_id[i] for i in ranked["ids"]], False
+        if not items:  # nothing answers it exactly: show the closest matches anyway
+            items, loose = rows[:10], True
+        for it in items:
+            it.pop("body_text", None)
+        return {"items": items, "answer": ranked["answer"], "loose": loose}
+
+    # --- bulk actions -----------------------------------------------------
+    async def archive_sender(self, addr: str) -> list[dict]:
+        """Archives everything from one sender, in every mailbox. Returns what to undo."""
+        with self.db.conn() as c:
+            rows = c.execute("SELECT id, account_id FROM messages WHERE from_addr=?", (addr.lower(),)).fetchall()
+        by_account: dict[int, list[int]] = {}
+        for r in rows:
+            by_account.setdefault(r["account_id"], []).append(r["id"])
+        done = []
+        for account_id, ids in by_account.items():
+            done.append(await asyncio.to_thread(self.mail.move_many, account_id, ids, None))
+        return done
+
     # --- sync -----------------------------------------------------------
     async def sync_all(self) -> int:
         if self.sync_lock.locked():
@@ -182,6 +434,7 @@ class Beseder:
     def mark_changed(self) -> None:
         """The mail list changed: wake up the pages listening on /api/events."""
         self.status["version"] += 1
+        self._followups = None
         self._changed.set()
         self._changed = asyncio.Event()
 

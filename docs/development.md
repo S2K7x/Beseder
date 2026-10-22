@@ -47,10 +47,12 @@ All settings are environment variables:
 | Path | What's there |
 |---|---|
 | `beseder/main.py` | HTTP API and PWA serving |
-| `beseder/service.py` | AI config, triage, periodic sync |
-| `beseder/mail/` | IMAP sync, message parsing and sanitizing, Microsoft OAuth |
+| `beseder/service.py` | AI config, triage, follow-ups, morning brief, AI search, periodic sync |
+| `beseder/mail/` | IMAP sync (inbox and Sent, read only), parsing and sanitizing, Microsoft OAuth |
 | `beseder/ai/providers.py` | Pluggable AI providers |
-| `beseder/ai/tasks.py` | Prompts and output validation for triage, briefs and drafts |
+| `beseder/ai/tasks.py` | Prompts and output validation for triage, briefs, drafts and search |
+| `beseder/unsubscribe.py` | One-click unsubscribe (RFC 8058) with its network guard |
+| `beseder/push.py` | Web Push (VAPID, aes128gcm) |
 | `web/` | The PWA: vanilla JS, no build step |
 | `tests/` | Pytest suite (fake IMAP server, fake AI provider) |
 

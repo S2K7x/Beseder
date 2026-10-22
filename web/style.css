@@ -169,6 +169,18 @@ body[data-view="settings"] .side-col { display: none; }
 .tag.dark { background: var(--ink); color: var(--ink-text); }
 .more { align-self: center; }
 
+/* --- follow-ups and AI search -------------------------------------------------- */
+.list-head h2, .ask-card h2 { font-size: 17px; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 10px; }
+.list-head p { margin: 6px 0 0; }
+.section-title { font-weight: 650; font-size: 15px; padding: 6px 6px 0; }
+.card-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.sent-card { cursor: default; }
+.ask-card .q { font-size: 18px; font-weight: 650; margin: 0 0 8px; line-height: 1.3; }
+.ask-card .overview { margin: 0 0 10px; }
+.search .ask { width: 34px; height: 34px; color: var(--text); }
+.reply-hint { display: flex; align-items: center; justify-content: center; gap: 6px; padding-top: 12px; }
+.reply-hint svg.icon { width: 15px; height: 15px; }
+
 .avatar {
   width: 44px; height: 44px; border-radius: 50%; flex: none; display: grid; place-items: center;
   font-weight: 650; font-size: 15px; letter-spacing: .02em; position: relative;

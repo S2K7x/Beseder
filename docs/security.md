@@ -11,7 +11,17 @@ mail. There is no "send" button anywhere in Beseder: drafts go to your Drafts fo
 you send them yourself, from your usual mail app.
 
 Beseder itself only changes your mailbox when **you** tap a button: mark as read, save a
-draft, archive or move to a folder (never to the trash, and with an Undo).
+draft, archive or move to a folder (never to the trash, and with an Undo). It reads your
+Sent folder to know what you already answered, but never writes to it.
+
+## Unsubscribing is locked down
+
+The unsubscribe link comes from the email, so from a stranger. When you tap
+**Unsubscribe** and the sender supports one-tap unsubscribe (RFC 8058), Beseder sends that
+one request itself, and only if the link is `https` and points to a public server: never to
+your Pi, your home network or your Tailscale devices. It connects to the exact address it
+checked, doesn't follow redirects and gives up after 10 seconds. Otherwise the sender's page
+(or a pre-filled email in your mail app) opens on your device, and Beseder sends nothing.
 
 ## Emails can't take over the AI
 
@@ -24,6 +34,10 @@ three ways:
    sender can't guess, and the AI is told it's data, not instructions.
 3. Every answer is checked: a category must be one of the six known ones, and an email id
    must be one that was actually sent. Anything else is thrown away.
+
+Your own words (sorting rules, search questions, draft instructions) are the only
+instructions the AI gets. Examples of your past emails, used to copy your style, are also
+passed as marked data.
 
 At worst, a booby-trapped email gets filed in the wrong category or skews a brief.
 
@@ -60,7 +74,7 @@ exists on your Pi (`secret.key`, readable only by Beseder). They are never writt
 
 ## You can see what the AI did
 
-Every AI action (sort, brief, draft) and every saved draft is recorded in a log inside
+Every AI action (sort, brief, draft, search), every saved draft, move and unsubscribe is recorded in a log inside
 the database, without any email content.
 
 ## What you should do

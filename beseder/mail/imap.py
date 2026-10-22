@@ -6,6 +6,7 @@ trash). No sending, no deleting.
 """
 
 import logging
+import re
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -20,7 +21,7 @@ from ..config import Config
 from ..crypto import Vault
 from ..db import DB, now_iso
 from .oauth_ms import MicrosoftOAuth
-from .parse import extract_attachment, parse_message
+from .parse import extract_attachment, parse_message, strip_quoted
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +51,19 @@ ARCHIVE_NAMES = ("Archive", "Archives", "INBOX.Archive")
 NOT_A_TARGET = {b"\\Noselect", b"\\NonExistent", b"\\Trash", b"\\Drafts", b"\\Sent",
                 b"\\Flagged", b"\\Important", b"\\All"}
 GMAIL = b"X-GM-EXT-1"
+# Sent folder: read only, to know what was answered and how the user writes.
+SENT_NAMES = ("Sent", "Sent Items", "Sent Messages", "Sent Mail", "INBOX.Sent", "Envoyés",
+              "Éléments envoyés", "Messages envoyés")
+SENT_INITIAL_DAYS = 30
+SENT_INITIAL_MAX = 200
+SENT_MAX_BYTES = 2 * 1024 * 1024
+# Phrases that ask the other person for something, besides a question mark.
+ASKS = re.compile(
+    r"\?|\b(let me know|can you|could you|would you|please (send|confirm|reply)|get back to me|"
+    r"dis-moi|tiens-moi au courant|peux-tu|pourrais-tu|pouvez-vous|pourriez-vous|merci de (me )?"
+    r"(confirmer|répondre|renvoyer|transmettre)|j'attends ton retour|j'attends votre retour)\b",
+    re.I,
+)
 OWN_WRITE_ECHO = 10  # seconds during which IDLE events caused by our own writes are ignored
 
 
@@ -116,6 +130,11 @@ class MailService:
             with self.connect(account) as client:
                 self._send_seen(client, account_id)
                 new = self._sync_inbox(client, account, quick)
+                if not quick:
+                    try:
+                        self._sync_sent(client, account)
+                    except Exception as e:  # never blocks the inbox
+                        log.warning("Sent folder sync failed for account %s: %s", account_id, type(e).__name__)
             with self.db.conn() as c:
                 c.execute("UPDATE accounts SET last_sync=?, last_error=NULL WHERE id=?", (now_iso(), account_id))
             return new
@@ -154,7 +173,7 @@ class MailService:
                 fetched.update(client.fetch(small, ["BODY.PEEK[]", "FLAGS", "INTERNALDATE"]))
             if big:
                 fetched.update(client.fetch(big, ["BODY.PEEK[HEADER]", "FLAGS", "INTERNALDATE"]))
-            rows, attachments = [], {}
+            rows, attachments, threads = [], {}, []
             for uid in chunk:
                 data = fetched.get(uid)
                 if not data:
@@ -168,17 +187,24 @@ class MailService:
                 rows.append(
                     (account["id"], uid, p.message_id, p.in_reply_to, p.refs, p.subject, p.from_name,
                      p.from_addr, p.reply_to, p.to_addrs, p.cc_addrs, p.date, p.snippet, p.body_text,
-                     p.body_html, int(p.list_unsubscribe), int(p.truncated), seen, int(initial or seen))
+                     p.body_html, int(p.list_unsubscribe), int(p.truncated), seen, int(initial or seen),
+                     p.unsub_url, p.unsub_mailto, int(p.unsub_one_click),
+                     int(b"\\Answered" in data.get(b"FLAGS", ())))
                 )
+                if p.message_id:
+                    threads.append((p.message_id, p.in_reply_to, p.refs, p.date))
                 if p.attachments:
                     attachments[uid] = p.attachments
             with self.db.conn() as c:
                 c.executemany(
                     "INSERT OR IGNORE INTO messages(account_id, uid, message_id, in_reply_to, refs, subject,"
                     " from_name, from_addr, reply_to, to_addrs, cc_addrs, date, snippet, body_text, body_html,"
-                    " list_unsubscribe, truncated, seen, notified) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " list_unsubscribe, truncated, seen, notified, unsub_url, unsub_mailto, unsub_one_click, answered)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
+                c.executemany("INSERT OR IGNORE INTO thread_index(message_id, in_reply_to, refs, date)"
+                              " VALUES(?,?,?,?)", threads)
                 for uid, items in attachments.items():
                     mid = c.execute("SELECT id FROM messages WHERE account_id=? AND uid=?",
                                     (account["id"], uid)).fetchone()[0]
@@ -215,12 +241,85 @@ class MailService:
         gone = [(account_id, uid) for uid in known if uid not in flags]
         # A message read in Beseder stays read even if the server hasn't heard about it yet.
         seen = [
-            (int(uid in pending or b"\\Seen" in flags[uid].get(b"FLAGS", ())), account_id, uid)
+            (int(uid in pending or b"\\Seen" in flags[uid].get(b"FLAGS", ())),
+             int(b"\\Answered" in flags[uid].get(b"FLAGS", ())), account_id, uid)
             for uid in known if uid in flags
         ]
         with self.db.conn() as c:
             c.executemany("DELETE FROM messages WHERE account_id=? AND uid=?", gone)
-            c.executemany("UPDATE messages SET seen=? WHERE account_id=? AND uid=?", seen)
+            c.executemany("UPDATE messages SET seen=?, answered=? WHERE account_id=? AND uid=?", seen)
+
+    def _sent_folder(self, client: IMAPClient, account) -> str | None:
+        if account["sent_folder"]:
+            return account["sent_folder"]
+        folders = client.list_folders()
+        folder = self._flag_folder(folders, b"\\Sent")
+        if folder is None:
+            names = {name for _flags, _sep, name in folders}
+            folder = next((n for n in SENT_NAMES if n in names or f"INBOX.{n}" in names), None)
+            if folder and folder not in names:
+                folder = f"INBOX.{folder}"
+        if folder:
+            with self.db.conn() as c:
+                c.execute("UPDATE accounts SET sent_folder=? WHERE id=?", (folder, account["id"]))
+        return folder
+
+    def _sync_sent(self, client: IMAPClient, account) -> int:
+        """Imports what the user sent (read only): who they wrote to, and in their own words."""
+        folder = self._sent_folder(client, account)
+        if folder is None:
+            return 0
+        try:
+            info = client.select_folder(folder, readonly=True)
+        except IMAPClientError:
+            with self.db.conn() as c:  # renamed or deleted: look for it again next time
+                c.execute("UPDATE accounts SET sent_folder=NULL WHERE id=?", (account["id"],))
+            return 0
+        uidvalidity = int(info.get(b"UIDVALIDITY", 0))
+        last_uid = account["sent_last_uid"]
+        if account["sent_uidvalidity"] is not None and account["sent_uidvalidity"] != uidvalidity:
+            with self.db.conn() as c:
+                c.execute("DELETE FROM sent_messages WHERE account_id=?", (account["id"],))
+            last_uid = 0
+        if last_uid == 0:
+            since = date.today() - timedelta(days=SENT_INITIAL_DAYS)
+            uids = sorted(client.search(["SINCE", since]))[-SENT_INITIAL_MAX:]
+        else:
+            uids = sorted(u for u in client.search(["UID", f"{last_uid + 1}:*"]) if u > last_uid)
+        new = 0
+        for i in range(0, len(uids), FETCH_CHUNK):
+            chunk = uids[i : i + FETCH_CHUNK]
+            sizes = client.fetch(chunk, ["RFC822.SIZE"])
+            small = [u for u in chunk if sizes.get(u, {}).get(b"RFC822.SIZE", 0) <= SENT_MAX_BYTES]
+            big = [u for u in chunk if u not in small]
+            fetched = {}
+            if small:
+                fetched.update(client.fetch(small, ["BODY.PEEK[]", "INTERNALDATE"]))
+            if big:
+                fetched.update(client.fetch(big, ["BODY.PEEK[HEADER]", "INTERNALDATE"]))
+            rows = []
+            for uid in chunk:
+                data = fetched.get(uid)
+                if not data:
+                    continue
+                internal = data.get(b"INTERNALDATE")
+                if isinstance(internal, datetime) and internal.tzinfo is None:
+                    internal = internal.replace(tzinfo=timezone.utc)
+                p = parse_message(data.get(b"BODY[]") or data.get(b"BODY[HEADER]") or b"",
+                                  fallback_date=internal, headers_only=uid in big)
+                own = "" if uid in big else strip_quoted(p.body_text)[:4000]
+                rows.append((account["id"], uid, p.message_id, p.in_reply_to, p.refs, p.first_to[1],
+                             p.first_to[0], p.subject, p.date, own, int(bool(ASKS.search(own)))))
+            with self.db.conn() as c:
+                c.executemany(
+                    "INSERT OR IGNORE INTO sent_messages(account_id, uid, message_id, in_reply_to, refs, to_addr,"
+                    " to_name, subject, date, body_text, expects_reply) VALUES(?,?,?,?,?,?,?,?,?,?,?)", rows)
+                c.execute("UPDATE accounts SET sent_uidvalidity=?, sent_last_uid=MAX(sent_last_uid, ?) WHERE id=?",
+                          (uidvalidity, chunk[-1], account["id"]))
+            new += len(rows)
+        with self.db.conn() as c:
+            c.execute("UPDATE accounts SET sent_uidvalidity=? WHERE id=?", (uidvalidity, account["id"]))
+        return new
 
     # --- allowed writes -----------------------------------------------
     def queue_seen(self, message_id: int) -> int | None:
@@ -320,14 +419,27 @@ class MailService:
     def move(self, message_id: int, target: str | None) -> dict:
         """Moves a message out of the inbox (target=None means the archive). Never to the trash."""
         m = self._message(message_id)
-        account = self.get_account(m["account_id"])
+        r = self.move_many(m["account_id"], [message_id], target)
+        return {"folder": r["folder"], "account_id": r["account_id"], "message_id": m["message_id"] or ""}
+
+    def move_many(self, account_id: int, message_ids: list[int], target: str | None) -> dict:
+        """Moves messages of one account out of the inbox, in one connection. Never to the trash.
+        Returns the folder and the Message-IDs, for Undo."""
+        with self.db.conn() as c:
+            rows = c.execute(
+                f"SELECT id, uid, message_id FROM messages WHERE account_id=? AND id IN ({','.join('?' * len(message_ids))})",
+                (account_id, *message_ids)).fetchall()
+        if not rows:
+            raise LookupError("Message not found")
+        uids = [r["uid"] for r in rows]
+        account = self.get_account(account_id)
         with self.connect(account) as client:
             folders = client.list_folders()
             if target is None and client.has_capability(GMAIL):
                 # Gmail's own archive: remove the Inbox label. Works even if "All Mail" is hidden
                 # from IMAP; Undo needs All Mail to find the message again.
                 client.select_folder("INBOX")
-                client.remove_gmail_labels([m["uid"]], ["\\Inbox"])
+                client.remove_gmail_labels(uids, ["\\Inbox"])
                 target = self._flag_folder(folders, b"\\All") or ""
             else:
                 if target is None:
@@ -342,30 +454,36 @@ class MailService:
                 if not client.has_capability("MOVE"):
                     raise ValueError("This mail server can't move messages")
                 client.select_folder("INBOX")
-                client.move([m["uid"]], target)
-            self._last_write[account["id"]] = time.monotonic()
+                client.move(uids, target)
+            self._last_write[account_id] = time.monotonic()
         with self.db.conn() as c:
-            c.execute("DELETE FROM messages WHERE id=?", (message_id,))
-        self.db.audit("moved", f"message={message_id} folder={target}")
-        return {"folder": target, "account_id": account["id"], "message_id": m["message_id"] or ""}
+            c.executemany("DELETE FROM messages WHERE id=?", [(r["id"],) for r in rows])
+        self.db.audit("moved", f"account={account_id} count={len(rows)} folder={target}")
+        return {"folder": target, "account_id": account_id,
+                "message_ids": [r["message_id"] for r in rows if r["message_id"]]}
 
-    def restore(self, account_id: int, folder: str, message_id_header: str) -> bool:
-        """Undo a move: finds the message by its Message-ID and puts it back in the inbox."""
-        if not message_id_header or not folder:
-            return False
+    def restore(self, account_id: int, folder: str, message_id_headers: list[str]) -> int:
+        """Undo a move: finds the messages by Message-ID and puts them back in the inbox.
+        Returns how many were found."""
+        wanted = [m for m in message_id_headers if m][:500]
+        if not wanted or not folder:
+            return 0
         with self.connect(self.get_account(account_id)) as client:
             folders = client.list_folders()
             client.select_folder(folder)
-            uids = client.search(["HEADER", "Message-ID", message_id_header])
+            uids = []
+            for mid in wanted:
+                found = client.search(["HEADER", "Message-ID", mid])
+                uids += found[-1:]
             if not uids:
-                return False
+                return 0
             if client.has_capability(GMAIL) and folder == self._flag_folder(folders, b"\\All"):
-                client.add_gmail_labels(uids[-1:], ["\\Inbox"])  # undo Gmail's archive
+                client.add_gmail_labels(uids, ["\\Inbox"])  # undo Gmail's archive
             else:
-                client.move(uids[-1:], "INBOX")
+                client.move(uids, "INBOX")
             self._last_write[account_id] = time.monotonic()
-        self.db.audit("restored", f"account={account_id} folder={folder}")
-        return True
+        self.db.audit("restored", f"account={account_id} count={len(uids)} folder={folder}")
+        return len(uids)
 
     # --- push from the server (IDLE) --------------------------------------
     def watch_inbox(self, account_id: int, on_new, stop: threading.Event) -> None:
