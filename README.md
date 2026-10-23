@@ -71,6 +71,6 @@ Run them in the `Beseder` folder.
 | Stop | `docker compose down` |
 | Update to the latest version | `git pull && docker compose up -d --build` |
 | See what's happening | `docker compose logs -f` |
-| Back up your data | `docker compose cp beseder:/data ./beseder-backup` |
+| Back up your data | **Settings › Your data › Download a backup** ([restore](docs/install.md#back-up-and-restore)) |
 
 Your settings and mail live in a Docker volume: updating or restarting never loses them.

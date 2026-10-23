@@ -522,3 +522,12 @@ body.locked .app, body.locked .tabbar { visibility: hidden; }
 .attachment-row .attachment { flex: 1; min-width: 0; }
 .preview img { display: block; max-width: 100%; max-height: 70vh; margin: 6px 0 4px; border-radius: 14px; }
 .preview { flex-basis: 100%; }
+
+/* --- activity log --------------------------------------------------------------------- */
+.activity { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; max-height: 360px; overflow-y: auto; }
+.activity-row { display: grid; grid-template-columns: 130px 1fr; gap: 2px 12px; font-size: 13px; padding: 6px 0;
+  border-bottom: 1px solid var(--line); }
+.activity-row .when { color: var(--muted); }
+.activity-row .what { font-weight: 600; }
+.activity-row .detail { grid-column: 2; color: var(--muted); overflow-wrap: anywhere; }
+.activity-row.warn .what { color: var(--danger); }

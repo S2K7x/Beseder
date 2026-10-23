@@ -104,18 +104,30 @@ docker compose up -d --build
 
 ## Back up and restore
 
-Your settings, encrypted passwords and synced mail are in a Docker volume.
+**The easy way:** in **Settings › Your data**, choose a passphrase and tap **Download a
+backup**. You get one `.besb` file holding your mailboxes, settings and synced mail, encrypted
+with that passphrase: keep it anywhere (iCloud Drive, a USB key…), it's useless without the
+passphrase. Don't lose the passphrase: nobody can open the file without it.
+
+To restore it (on the same Pi or a new one, after step 2):
 
 ```bash
-# Back up
-docker compose cp beseder:/data ./beseder-backup
-
-# Restore (on a new Pi, after step 2)
-docker compose cp ./beseder-backup/. beseder:/data
-docker compose restart
+docker compose stop
+docker compose cp beseder-backup-2026-10-23.besb beseder:/data/restore.besb
+docker compose run --rm -it beseder python -m beseder restore /data/restore.besb
+docker compose up -d
 ```
 
-Keep backups somewhere private: they contain the key that decrypts your mailbox passwords.
+Beseder asks you to type `yes`, then the passphrase. Without Docker:
+`python -m beseder restore beseder-backup-2026-10-23.besb` while Beseder is stopped.
+
+**From the command line** (not encrypted with a passphrase, so keep it private: it contains
+the key that decrypts your mailbox passwords):
+
+```bash
+docker compose cp beseder:/data ./beseder-backup          # back up
+docker compose cp ./beseder-backup/. beseder:/data        # restore, then: docker compose restart
+```
 
 ## Optional settings
 

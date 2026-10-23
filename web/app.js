@@ -1321,7 +1321,7 @@ async function renderSettings() {
   } catch (e) { toast(e.message); return; }
   col.replaceChildren(h("div", { class: "settings-grid" },
     h("div", { style: "display:flex;flex-direction:column;gap:18px" }, accountsCard(accounts, outlook), notificationsCard(), lockCard(), profileCard(ai), setupCard()),
-    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, aiCard(ai), assistantCard(), rulesCard(rules), safetyCard())));
+    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, aiCard(ai), assistantCard(), rulesCard(rules), safetyCard(), dataCard())));
 }
 
 function field(label, input, hint) {
@@ -2062,6 +2062,69 @@ function showLock() {
   // The pages behind it must not keep any mail on screen.
   ["list-col", "reader-col", "side-col", "settings-col"].forEach((id) => $(id).replaceChildren());
   input.focus();
+}
+
+const ACTIVITY = {
+  ai_triage: "AI sorted new mail", ai_summary: "AI brief", ai_draft: "AI drafted a reply", ai_explain: "AI summarized a conversation",
+  ai_search: "AI search", draft_saved: "Draft saved in Drafts", moved: "Archived or moved", restored: "Put back in the inbox (Undo)",
+  unsubscribed: "Unsubscribed", unlocked: "Device unlocked", unlock_failed: "Wrong passcode", lock_changed: "App lock changed",
+  backup: "Backup downloaded",
+};
+
+// Your data: what Beseder did (never any email content), and encrypted backups.
+function dataCard() {
+  const pass = h("input", { type: "password", autocomplete: "new-password" });
+  const again = h("input", { type: "password", autocomplete: "new-password" });
+  const err = h("div", { class: "error" });
+  const btn = h("button", { class: "pill dark sm" }, "Download a backup");
+  btn.addEventListener("click", async () => {
+    err.textContent = "";
+    if (pass.value !== again.value) { err.textContent = "The two passphrases don't match"; return; }
+    const done = busy(btn, "Preparing…");
+    try {
+      const r = await fetch("/api/backup", { method: "POST", headers: { "X-Beseder": "1", "Content-Type": "application/json" },
+        body: JSON.stringify({ passphrase: pass.value }) });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `Error ${r.status}`);
+      const name = (r.headers.get("Content-Disposition") || "").match(/filename=([^;]+)/)?.[1] || "beseder-backup.besb";
+      const url = URL.createObjectURL(await r.blob());
+      h("a", { href: url, download: name }).click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      pass.value = again.value = "";
+      toast("Backup downloaded. Keep the passphrase somewhere safe: without it the file can't be opened.");
+    } catch (e) { err.textContent = e.message; }
+    finally { done(); }
+  });
+  const log = h("div", { class: "activity" });
+  let before = 0;
+  const more = h("button", { class: "pill sm", hidden: true });
+  more.textContent = "Show more";
+  async function load() {
+    try {
+      const r = await api(`/api/activity?limit=50${before ? `&before=${before}` : ""}`);
+      if (!before && !r.items.length) log.append(h("p", { class: "muted small" }, "Nothing yet."));
+      for (const it of r.items) {
+        log.append(h("div", { class: "activity-row" + (it.action === "unlock_failed" ? " warn" : "") },
+          h("span", { class: "when" }, fmtWhen(it.ts)),
+          h("span", { class: "what" }, ACTIVITY[it.action] || it.action),
+          it.detail ? h("span", { class: "detail" }, it.detail) : null));
+      }
+      before = r.more || 0;
+      more.hidden = !r.more;
+    } catch (e) { log.append(h("div", { class: "error" }, e.message)); }
+  }
+  more.addEventListener("click", load);
+  const activity = h("details", { class: "advanced" }, h("summary", {}, "Activity log"),
+    h("p", { class: "muted small" }, "Everything the AI and Beseder did, newest first. Email content is never recorded."), log, more);
+  activity.addEventListener("toggle", () => { if (activity.open && !log.childElementCount) load(); });
+  return h("div", { class: "card" },
+    h("h2", {}, "Your data"),
+    h("p", { class: "muted small", style: "margin:0" },
+      "A backup holds your mailboxes, settings and synced mail, sealed with a passphrase you choose. Restoring it is one command (see the docs)."),
+    field("Backup passphrase", pass, "At least 8 characters. Without it, the backup can't be opened, by anyone."),
+    field("Repeat it", again),
+    h("div", { class: "btns" }, btn),
+    err,
+    activity);
 }
 
 function lockCard() {

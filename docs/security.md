@@ -96,5 +96,11 @@ the database, without any email content.
 ## What you should do
 
 - Keep Tailscale on and never use `tailscale funnel`.
-- Keep your backups private: they contain the encryption key.
+- Use **Settings › Your data** for backups: they are encrypted with your passphrase (scrypt +
+  Fernet). Copies made from the command line aren't, so keep those private.
+
+## You can see what Beseder did
+
+**Settings › Your data › Activity log** lists every AI action, draft, move, unsubscribe,
+unlock and backup, newest first, without any email content.
 - If you stop using Beseder, delete the app passwords you created (see [mailboxes](mailboxes.md)).

@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from imapclient.exceptions import IMAPClientError
 from pydantic import BaseModel
 
+from . import backup
 from .ai import tasks
 from .ai.providers import AIError, make_provider, presets_for
 from .config import Config
@@ -134,6 +135,10 @@ class BulkIn(BaseModel):
     action: str  # archive | read | category | snooze | unsnooze
     category: str = ""
     until: str = ""
+
+
+class BackupIn(BaseModel):
+    passphrase: str
 
 
 class UnlockIn(BaseModel):
@@ -296,6 +301,29 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             raise HTTPException(400, str(e))
         set_session(request, response, token)
         return {"enabled": lock.enabled}
+
+    # --- your data: activity log and backups --------------------------------
+    @app.get("/api/activity")
+    def activity(before: int = 0, limit: int = 100):
+        """What Beseder and the AI did (never any email content)."""
+        with core.db.conn() as c:
+            rows = [dict(r) for r in c.execute(
+                "SELECT id, ts, action, detail FROM audit_log WHERE (?=0 OR id<?) ORDER BY id DESC LIMIT ?",
+                (before, before, max(1, min(limit, 500))))]
+        return {"items": rows, "more": rows[-1]["id"] if len(rows) == max(1, min(limit, 500)) else None}
+
+    @app.post("/api/backup")
+    async def make_backup(body: BackupIn):
+        try:
+            data = await asyncio.to_thread(backup.create, config.db_path, config.key_path, body.passphrase)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        core.db.audit("backup", f"{len(data)} bytes")
+        name = f"beseder-backup-{now_iso()[:10]}.besb"
+        return Response(data, media_type="application/octet-stream", headers={
+            "Content-Disposition": f"attachment; filename={name}",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        })
 
     # --- status -----------------------------------------------------------
     @app.get("/api/health")
