@@ -120,5 +120,7 @@ Any service with an OpenAI-compatible API works (Groq, Mistral, LM Studio, vLLM�
   press Enter): *"when is my dentist appointment?"*. The AI turns it into a search, then
   picks the emails that answer it. Plain searches (no ✨) don't use the AI at all, ignore
   accents and match the start of words.
+- **Summarize a conversation**: the ✨ button next to "Reply with AI" explains the whole
+  thread (your own replies included): where it stands, what you're asked to do, key dates.
 - **Brief language** (Settings › Profile): the language of your briefs. Drafts always
   follow the language of the email you answer.

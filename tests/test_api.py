@@ -181,3 +181,13 @@ def test_triage_keeps_batches_done_before_an_ai_failure(client, core, monkeypatc
     with core.db.conn() as c:
         done = c.execute("SELECT COUNT(*) FROM messages WHERE category='other'").fetchone()[0]
     assert done == 15
+
+
+def test_downloads_keep_their_sandbox_policy(client, core, monkeypatch):
+    from .conftest import add_account, add_message
+
+    mid = add_message(core, add_account(core), 1)
+    monkeypatch.setattr(core.mail, "download_attachment", lambda message_id, idx: ("x.html", b"<script>1</script>"))
+    r = client.get(f"/api/messages/{mid}/attachments/0")
+    assert r.headers["content-security-policy"] == "sandbox; default-src 'none'"
+    assert client.get("/").headers["content-security-policy"].startswith("default-src 'self'")

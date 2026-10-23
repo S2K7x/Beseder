@@ -322,3 +322,43 @@ def parse_search_rank(text: str, allowed_ids: list[int]) -> dict:
         if mid in allowed_ids and mid not in ids:
             ids.append(mid)
     return {"ids": ids, "answer": str(obj.get("answer") or "")[:500]}
+
+
+# --- conversation summary -------------------------------------------------------
+THREAD_LIMIT = 20
+
+
+def thread_prompt(items: list[dict], my_name: str, language: str = "English") -> tuple[str, str]:
+    """items: oldest first, {"from", "date", "text"}; the user's own replies say "from": "me"."""
+    tag = _tag()
+    system = (
+        f"You explain an email conversation to {my_name or 'the user'}, concisely, in {language}.\n"
+        f"{_GUARD.format(tag=tag)}\n"
+        'Messages "from": "me" were written by the user.\n'
+        "Reply ONLY with a JSON object: "
+        '{"summary": "2 to 4 sentences: what it is about and where it stands", '
+        '"actions": ["what the user is asked to do", ...], '
+        '"dates": [{"what": "...", "when": "as written in the emails"}]}\n'
+        "Use empty lists when there is nothing. Do not include URLs."
+    )
+    payload = [{"from": it["from"], "date": it["date"], "text": (it["text"] or "")[:2500]}
+               for it in items[-THREAD_LIMIT:]]
+    return system, _wrap(payload, tag)
+
+
+def parse_thread(text: str) -> dict:
+    try:
+        obj = extract_json(text)
+        if not isinstance(obj, dict):
+            raise ValueError
+    except ValueError:
+        return {"summary": text.strip()[:2000], "actions": [], "dates": []}
+    actions = [str(a)[:300] for a in obj.get("actions") or [] if isinstance(a, (str, int, float))][:8]
+    dates = [{"what": str(d.get("what", ""))[:200], "when": str(d.get("when", ""))[:100]}
+             for d in obj.get("dates") or [] if isinstance(d, dict) and d.get("when")][:8]
+    return {"summary": str(obj.get("summary") or "")[:2000], "actions": actions, "dates": dates}
+
+
+async def explain_thread(provider: Provider, items: list[dict], my_name: str, language: str = "English") -> dict:
+    system, user = thread_prompt(items, my_name, language)
+    return parse_thread(await provider.complete(system, user, max_tokens=1200))

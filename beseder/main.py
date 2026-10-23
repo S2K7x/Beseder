@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -178,6 +179,19 @@ LIST_COLUMNS = ("m.id, m.account_id, a.name AS account_name, m.subject, m.from_n
                 " m.snippet, m.seen, m.category, m.category_source")
 
 
+def image_type(data: bytes) -> str | None:
+    """The picture type from the file's own bytes, not from what the email claims."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def fts_query(q: str) -> str | None:
     """Search box text -> FTS5 query: every word must match the start of a word ("fact"
     finds "facture"). Accents are ignored by the index. Quotes keep FTS syntax out."""
@@ -223,7 +237,9 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             response = JSONResponse({"detail": "Beseder is locked", "locked": True}, status_code=401)
         else:
             response = await call_next(request)
-        response.headers["Content-Security-Policy"] = CSP
+        # A route may set a stricter policy (downloads are sandboxed): keep it.
+        if "content-security-policy" not in response.headers:
+            response.headers["Content-Security-Policy"] = CSP
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         if request.url.path.startswith("/api/"):
@@ -456,6 +472,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
                 "SELECT idx, filename, content_type, size FROM attachments WHERE message_id=? ORDER BY idx",
                 (message_id,))]
         m["thread"] = core.conversation(m)
+        m["invite"] = json.loads(m["invite"]) if m.get("invite") else None
         return m
 
     @app.post("/api/messages/{message_id}/snooze")
@@ -498,7 +515,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         return result
 
     @app.get("/api/messages/{message_id}/attachments/{idx}")
-    async def download_attachment(message_id: int, idx: int):
+    async def download_attachment(message_id: int, idx: int, preview: bool = False):
         get_message(message_id)
         try:
             name, data = await asyncio.to_thread(core.mail.download_attachment, message_id, idx)
@@ -506,11 +523,43 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
             raise HTTPException(404, str(e))
         except (IMAPClientError, OSError, PermissionError) as e:
             raise HTTPException(502, f"IMAP error: {e}")
-        # Always a download, never rendered: an HTML or SVG attachment must not run in Beseder's page.
-        return Response(data, media_type="application/octet-stream", headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name, safe='')}",
+        return file_response(name, data, preview)
+
+    def file_response(name: str, data: bytes, preview: bool = False, media_type: str = "application/octet-stream"):
+        """A download, never rendered in Beseder's page (an HTML or SVG file must not run). The only
+        exception, for previews: PNG, JPEG, GIF and WebP pictures, checked by their first bytes."""
+        image = image_type(data) if preview else None
+        if preview and not image:
+            raise HTTPException(415, "No preview for this file: download it instead")
+        return Response(data, media_type=image or media_type, headers={
+            "Content-Disposition": f"{'inline' if image else 'attachment'}; filename*=UTF-8''{quote(name, safe='')}",
             "Content-Security-Policy": "sandbox; default-src 'none'",
         })
+
+    @app.get("/api/messages/{message_id}/invite.ics")
+    async def invite_file(message_id: int):
+        """The calendar invite, for "Add to calendar" (opened by the device's calendar app)."""
+        get_message(message_id)
+        data = await imap_call(core.mail.calendar_file, message_id)
+        return file_response("invite.ics", data, media_type="text/calendar")
+
+    @app.post("/api/messages/{message_id}/explain")
+    async def explain(message_id: int):
+        """AI summary of the whole conversation: where it stands, what you're asked, key dates."""
+        m = get_message(message_id)
+        me = core.db.get_setting("my_name", "") or ""
+        items = [{"from": "me" if it["kind"] == "sent" else f"{it['name']} <{it['addr']}>", "date": it["date"],
+                  "text": it["body_text"]} for it in core.conversation(m)]
+        items.append({"from": f"{m['from_name']} <{m['from_addr']}>", "date": m["date"],
+                      "text": m["body_text"] or m["snippet"]})
+        items.sort(key=lambda it: it["date"])
+        try:
+            result = await tasks.explain_thread(core.provider(), items, me,
+                                                core.db.get_setting("summary_language", "English") or "English")
+        except AIError as e:
+            ai_error(e)
+        core.db.audit("ai_explain", f"message={message_id} emails={len(items)}")
+        return result
 
     @app.post("/api/messages/{message_id}/load-full")
     async def load_full(message_id: int):
@@ -630,14 +679,17 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         m["account_name"] = core.mail.get_account(account_id)["name"]
         return m
 
+    @app.get("/api/accounts/{account_id}/browse/invite.ics")
+    async def browse_invite(account_id: int, folder: str, uid: int):
+        need_account(account_id)
+        data = await imap_call(core.mail.folder_calendar, account_id, folder, uid)
+        return file_response("invite.ics", data, media_type="text/calendar")
+
     @app.get("/api/accounts/{account_id}/browse/attachment")
-    async def browse_attachment(account_id: int, folder: str, uid: int, idx: int):
+    async def browse_attachment(account_id: int, folder: str, uid: int, idx: int, preview: bool = False):
         need_account(account_id)
         name, data = await imap_call(core.mail.folder_attachment, account_id, folder, uid, idx)
-        return Response(data, media_type="application/octet-stream", headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name, safe='')}",
-            "Content-Security-Policy": "sandbox; default-src 'none'",
-        })
+        return file_response(name, data, preview)
 
     @app.get("/api/accounts/{account_id}/folders")
     async def account_folders(account_id: int):

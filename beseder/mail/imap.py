@@ -5,12 +5,15 @@ draft, move a message out of the inbox (archive or a folder the user picks, neve
 trash). No sending, no deleting.
 """
 
+import json
 import logging
 import re
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from email import policy
 from email.message import EmailMessage
+from email.parser import BytesParser
 from email.utils import formatdate, make_msgid
 
 from imapclient import IMAPClient
@@ -22,6 +25,7 @@ from ..crypto import Vault
 from ..db import DB, now_iso
 from .oauth_ms import MicrosoftOAuth
 from .parse import extract_attachment, parse_message, strip_quoted
+from .invite import calendar_bytes
 from .threads import thread_key
 
 log = logging.getLogger(__name__)
@@ -195,7 +199,7 @@ class MailService:
                      p.from_addr, p.reply_to, p.to_addrs, p.cc_addrs, p.date, p.snippet, p.body_text,
                      p.body_html, int(p.list_unsubscribe), int(p.truncated), seen, int(initial or seen),
                      p.unsub_url, p.unsub_mailto, int(p.unsub_one_click),
-                     int(b"\\Answered" in data.get(b"FLAGS", ())))
+                     int(b"\\Answered" in data.get(b"FLAGS", ())), json.dumps(p.invite) if p.invite else "")
                 )
                 threads.append((p.message_id, p.in_reply_to, p.refs, p.date, p.subject, p.from_addr))
                 if p.attachments:
@@ -212,7 +216,7 @@ class MailService:
                     "INSERT OR IGNORE INTO messages(account_id, uid, message_id, in_reply_to, refs, subject,"
                     " from_name, from_addr, reply_to, to_addrs, cc_addrs, date, snippet, body_text, body_html,"
                     " list_unsubscribe, truncated, seen, notified, unsub_url, unsub_mailto, unsub_one_click, answered,"
-                    " thread_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " invite, thread_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     rows,
                 )
                 for uid, items in attachments.items():
@@ -390,10 +394,23 @@ class MailService:
             raise LookupError("This message is no longer in the inbox")
         p = parse_message(data[b"BODY[]"])
         with self.db.conn() as c:
-            c.execute("UPDATE messages SET body_text=?, body_html=?, snippet=?, truncated=0 WHERE id=?",
-                      (p.body_text, p.body_html, p.snippet, message_id))
+            c.execute("UPDATE messages SET body_text=?, body_html=?, snippet=?, truncated=0, invite=? WHERE id=?",
+                      (p.body_text, p.body_html, p.snippet, json.dumps(p.invite) if p.invite else "", message_id))
             c.executemany("INSERT OR IGNORE INTO attachments(message_id, idx, filename, content_type, size)"
                           " VALUES(?,?,?,?,?)", [(message_id, *a) for a in p.attachments])
+
+    def calendar_file(self, message_id: int) -> bytes:
+        """The invite (.ics) of a message, fetched again from the server."""
+        m = self._message(message_id)
+        with self.connect(self.get_account(m["account_id"])) as client:
+            client.select_folder("INBOX", readonly=True)
+            data = client.fetch([m["uid"]], ["BODY.PEEK[]"]).get(m["uid"])
+        if not data:
+            raise LookupError("This message is no longer in the inbox")
+        ics = calendar_bytes(BytesParser(policy=policy.default).parsebytes(data[b"BODY[]"]))
+        if not ics:
+            raise LookupError("This email has no calendar invite")
+        return ics
 
     def download_attachment(self, message_id: int, idx: int) -> tuple[str, bytes]:
         """Fetches the message again from the server and returns one attachment."""
@@ -555,8 +572,14 @@ class MailService:
         return {"uid": uid, "folder": folder, "account_id": account_id, "message_id": p.message_id,
                 "subject": p.subject, "from_name": p.from_name, "from_addr": p.from_addr, "reply_to": p.reply_to,
                 "to_addrs": p.to_addrs, "cc_addrs": p.cc_addrs, "date": p.date, "body_text": p.body_text,
-                "body_html": p.body_html,
+                "body_html": p.body_html, "invite": p.invite,
                 "attachments": [{"idx": i, "filename": n, "content_type": t, "size": z} for i, n, t, z in p.attachments]}
+
+    def folder_calendar(self, account_id: int, folder: str, uid: int) -> bytes:
+        ics = calendar_bytes(BytesParser(policy=policy.default).parsebytes(self._fetch_full(account_id, folder, uid)))
+        if not ics:
+            raise LookupError("This email has no calendar invite")
+        return ics
 
     def folder_attachment(self, account_id: int, folder: str, uid: int, idx: int) -> tuple[str, bytes]:
         return extract_attachment(self._fetch_full(account_id, folder, uid), idx)

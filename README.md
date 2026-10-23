@@ -10,7 +10,10 @@ running on your own Raspberry Pi.
 
 - **Sorts your mail** into Important, Notifications, Newsletters, Promotions, Receipts and Other.
 - **Instant and notified**: new mail shows up within seconds, with a notification for the important ones.
-- **Conversations**: replies are grouped, with your own answers in the timeline.
+- **Conversations**: replies are grouped, with your own answers in the timeline, and one tap
+  for an AI summary of a long thread.
+- **Invites and pictures**: calendar invites show as an event card with "Add to calendar";
+  picture attachments can be previewed.
 - **All your mail, not just the inbox**: browse Archive, All Mail, Sent or any folder and
   search years of mail on the server (Gmail's search syntax works too), or see everything
   from one sender.

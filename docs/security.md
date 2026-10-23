@@ -52,7 +52,11 @@ At worst, a booby-trapped email gets filed in the wrong category or skews a brie
   tell senders when you open their email.
 - AI answers are shown as plain text, never as HTML.
 - Attachments are always downloaded as files, never opened inside Beseder, so an HTML or
-  SVG attachment can't run anything.
+  SVG attachment can't run anything. The only exception is the picture preview, and only
+  for real PNG, JPEG, GIF or WebP files: Beseder checks the file's own bytes, not what the
+  email claims it is.
+- Calendar invites are only displayed. Accepting or declining means sending an email, so
+  you do it from your calendar or mail app.
 
 ## Notifications are end-to-end encrypted
 

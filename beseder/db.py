@@ -109,6 +109,7 @@ MIGRATIONS = [
     ("messages", "thread_key", "TEXT NOT NULL DEFAULT ''"),
     ("messages", "snoozed_until", "TEXT"),   # hidden from the inbox until then (Beseder only)
     ("messages", "resurfaced_at", "TEXT"),   # back from snooze: pinned on top until opened
+    ("messages", "invite", "TEXT NOT NULL DEFAULT ''"),  # calendar event as JSON, '' if none
 ]
 
 # Columns of tables created by LATE_SCHEMA.

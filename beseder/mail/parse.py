@@ -12,6 +12,8 @@ from email.utils import getaddresses, parsedate_to_datetime
 
 import nh3
 
+from .invite import calendar_bytes, parse_invite
+
 _TAGS = set(nh3.ALLOWED_TAGS) | {"font"}
 _ATTRS = {
     "*": {"style", "align", "valign", "width", "height", "bgcolor", "color", "dir", "title"},
@@ -88,6 +90,7 @@ class ParsedMessage:
     unsub_mailto: str = ""     # mailto: from List-Unsubscribe
     unsub_one_click: bool = False  # RFC 8058: the link accepts a POST, no page to visit
     first_to: tuple = ("", "")     # (name, address) of the first recipient
+    invite: dict | None = None     # calendar event, see invite.parse_invite
 
 
 def parse_unsubscribe(value: str, post: str) -> tuple[str, str, bool]:
@@ -197,6 +200,14 @@ def extract_attachment(raw: bytes, idx: int) -> tuple[str, bytes]:
     return (part.get_filename() or f"attachment-{idx + 1}"), (part.get_payload(decode=True) or b"")
 
 
+def _invite(msg: EmailMessage) -> dict | None:
+    data = calendar_bytes(msg)
+    try:
+        return parse_invite(data) if data else None
+    except Exception:
+        return None
+
+
 def parse_message(raw: bytes, fallback_date: datetime | None = None, headers_only: bool = False) -> ParsedMessage:
     msg = BytesParser(policy=policy.default).parsebytes(raw)
 
@@ -256,6 +267,7 @@ def parse_message(raw: bytes, fallback_date: datetime | None = None, headers_onl
         truncated=headers_only,
         attachments=[] if headers_only else list_attachments(msg),
         first_to=(to_pairs[0][0], to_pairs[0][1].lower()) if to_pairs else ("", ""),
+        invite=None if headers_only else _invite(msg),
         **dict(zip(("unsub_url", "unsub_mailto", "unsub_one_click"),
                    parse_unsubscribe(header("list-unsubscribe"), header("list-unsubscribe-post")))),
     )

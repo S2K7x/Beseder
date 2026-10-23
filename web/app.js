@@ -50,6 +50,7 @@ const ICONS = {
   checks: [["path", "M18 6 7 17l-5-5"], ["path", "m22 10-7.5 7.5L13 16"]],
   alarm: [["circle", 12, 13, 8], ["path", "M12 9v4l2 2"], ["path", "M5 3 2 6"], ["path", "m22 6-3-3"]],
   x: [["path", "M18 6 6 18"], ["path", "m6 6 12 12"]],
+  calendar: [["rect", 3, 4, 18, 18, 2], ["path", "M16 2v4"], ["path", "M8 2v4"], ["path", "M3 10h18"]],
   send: [["path", "m22 2-7 20-4-9-9-4Z"], ["path", "M22 2 11 13"]],
   paperclip: [["path", "m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"]],
 };
@@ -613,11 +614,10 @@ async function renderFolderMessage(col, ref) {
     onclick: () => { plain = !plain; textBtn.classList.toggle("on", plain); renderBody(); } }, icon("fileText"));
   const addr = ((m.reply_to || "").match(/<([^>]+)>/) || [null, m.reply_to || m.from_addr])[1].trim();
   const subject = /^re\s?:/i.test(m.subject || "") ? m.subject : `Re: ${m.subject || ""}`;
-  const files = m.attachments.length ? h("div", { class: "attachments" }, m.attachments.map((a) =>
-    h("a", { class: "attachment", download: a.filename, title: a.filename,
-      href: `/api/accounts/${ref.accountId}/browse/attachment?` + new URLSearchParams({ folder: b.folder, uid: ref.uid, idx: a.idx }) },
-      h("span", { class: "ico" }, icon("paperclip")),
-      h("span", { class: "grow" }, h("span", { class: "t" }, a.filename), h("span", { class: "s" }, fmtSize(a.size)))))) : null;
+  const files = attachmentList(m.attachments, (a) =>
+    `/api/accounts/${ref.accountId}/browse/attachment?` + new URLSearchParams({ folder: b.folder, uid: ref.uid, idx: a.idx }));
+  const invite = m.invite ? inviteCard(m.invite,
+    `/api/accounts/${ref.accountId}/browse/invite.ics?` + new URLSearchParams({ folder: b.folder, uid: ref.uid })) : null;
   col.replaceChildren(h("div", { class: "card reader" },
     h("div", { class: "reader-top" },
       h("span", { class: "tag" }, icon("folder"), b.folder),
@@ -631,7 +631,7 @@ async function renderFolderMessage(col, ref) {
     h("div", { class: "actions-row" },
       h("a", { class: "pill", href: `mailto:${encodeURIComponent(addr)}?subject=${encodeURIComponent(subject)}` }, icon("reply"), "Reply in mail app"),
       imgBtn, textBtn),
-    bodyBox, files));
+    invite, bodyBox, files));
   document.querySelectorAll(".mail-card[data-uid]").forEach((c) => c.classList.toggle("selected", Number(c.dataset.uid) === ref.uid));
 }
 
@@ -958,11 +958,11 @@ async function renderMessage(col, id) {
         sel.focus();
       } catch (e) { movePicker.replaceChildren(h("span", { class: "error" }, e.message)); }
     } }, icon("folderMove"));
-  const files = (m.attachments || []).length ? h("div", { class: "attachments" }, m.attachments.map((a) =>
-    h("a", { class: "attachment", href: `/api/messages/${m.id}/attachments/${a.idx}`, download: a.filename, title: a.filename },
-      h("span", { class: "ico" }, icon("paperclip")),
-      h("span", { class: "grow" }, h("span", { class: "t" }, a.filename), h("span", { class: "s" }, fmtSize(a.size)))))) : null;
+  const files = attachmentList(m.attachments || [], (a) => `/api/messages/${m.id}/attachments/${a.idx}`);
   const replyBtn = h("button", { class: "pill", onclick: () => composer.draft() }, icon("reply"), "Reply with AI");
+  const explainBox = h("div", { class: "explain", hidden: true });
+  const explainBtn = h("button", { class: "round sm", title: (m.thread || []).length ? "Summarize this conversation" : "Summarize this email",
+    "aria-label": "Summarize", onclick: () => explain(m, explainBox, explainBtn) }, icon("sparkles"));
   const snoozeBtn = h("button", { class: "round sm", title: "Snooze (s)", "aria-label": "Snooze",
     onclick: () => snoozePicker(snoozeBtn, (until) => snoozeMessage(m, until)) }, icon("alarm"));
   const unsubBtn = m.unsub_url || m.unsub_mailto ? h("button", { class: "round sm",
@@ -980,15 +980,84 @@ async function renderMessage(col, id) {
         onclick: () => { Object.assign(state, LIST_RESET, { sender: m.from_addr }); navigateList(); } }, m.from_name || m.from_addr)),
       h("div", { class: "sub" }, m.from_name ? `${m.from_addr} · ` : "", `to ${m.account_name}`),
       h("div", { class: "subject" }, m.subject || "(no subject)")),
-    h("div", { class: "actions-row" }, replyBtn, archiveBtn, snoozeBtn, moveBtn, unsubBtn, ruleBtn, imgBtn, textBtn),
+    h("div", { class: "actions-row" }, replyBtn, explainBtn, archiveBtn, snoozeBtn, moveBtn, unsubBtn, ruleBtn, imgBtn, textBtn),
     m.needs_reply && !m.answered && !m.followup_done ? h("div", { class: "small muted reply-hint" }, icon("clock"),
       "The AI thinks this email expects an answer from you.") : null,
     movePicker,
+    explainBox,
+    m.invite ? inviteCard(m.invite, `/api/messages/${m.id}/invite.ics`) : null,
     conversation(m),
     bodyBox,
     files,
     composer.el));
   markSelected();
+}
+
+// Attachments: always downloaded as files. Pictures can also be previewed, on demand (each
+// preview fetches the email from the server; the server checks it really is a picture).
+const PREVIEWABLE = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+function attachmentList(atts, urlFor) {
+  if (!atts.length) return null;
+  const box = h("div", { class: "attachments" });
+  for (const a of atts) {
+    const url = urlFor(a);
+    const link = h("a", { class: "attachment", href: url, download: a.filename, title: a.filename },
+      h("span", { class: "ico" }, icon(PREVIEWABLE.includes(a.content_type) ? "image" : "paperclip")),
+      h("span", { class: "grow" }, h("span", { class: "t" }, a.filename), h("span", { class: "s" }, fmtSize(a.size))));
+    if (PREVIEWABLE.includes(a.content_type) && a.size < 15e6) {
+      const shown = h("div", { class: "preview", hidden: true });
+      const btn = h("button", { class: "pill sm", onclick: () => {
+        if (!shown.childElementCount) {
+          const img = h("img", { alt: a.filename, src: url + (url.includes("?") ? "&" : "?") + "preview=true" });
+          img.addEventListener("error", () => shown.replaceChildren(h("span", { class: "small muted" }, "No preview: download it instead")));
+          shown.append(img);
+        }
+        shown.hidden = !shown.hidden;
+        btn.textContent = shown.hidden ? "Preview" : "Hide";
+      } }, "Preview");
+      box.append(h("div", { class: "attachment-row" }, link, btn), shown);
+    } else box.append(link);
+  }
+  return box;
+}
+
+// Calendar invite: the event, and "Add to calendar" (the device's calendar app opens the .ics).
+// Beseder can't answer it: accepting means sending an email, which Beseder never does.
+function inviteCard(ev, icsUrl) {
+  const fmt = (w, withDay) => !w ? "" : w.all_day
+    ? new Date(w.iso + "T12:00:00").toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })
+    : new Date(w.iso).toLocaleString("en-GB", withDay
+      ? { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
+  const sameDay = ev.end && !ev.start.all_day && new Date(ev.start.iso).toDateString() === new Date(ev.end.iso).toDateString();
+  const when = fmt(ev.start, true) + (ev.end && !ev.start.all_day ? ` – ${fmt(ev.end, !sameDay)}` : "");
+  const cancelled = ev.method === "CANCEL" || ev.status === "CANCELLED";
+  return h("div", { class: "invite" + (cancelled ? " cancelled" : "") },
+    h("div", { class: "invite-head" }, icon("calendar"), h("span", { class: "t" }, ev.title),
+      cancelled ? h("span", { class: "tag high" }, "Cancelled") : null),
+    h("div", { class: "s" }, when),
+    ev.location ? h("div", { class: "s" }, ev.location) : null,
+    ev.organizer ? h("div", { class: "s" }, `Organized by ${ev.organizer}`) : null,
+    cancelled ? null : h("div", { class: "btns", style: "margin-top:10px" },
+      h("a", { class: "pill sm dark", href: icsUrl, download: "invite.ics" }, icon("plus"), "Add to calendar"),
+      h("span", { class: "small muted" }, "Answer from your calendar or mail app")));
+}
+
+// On-demand AI summary of the conversation: where it stands, what you're asked, key dates.
+async function explain(m, box, btn) {
+  if (!box.hidden && box.childElementCount) { box.hidden = true; return; }
+  box.hidden = false;
+  if (box.childElementCount) return;
+  box.replaceChildren(h("p", { class: "muted small" }, "Reading the conversation…"));
+  const done = busy(btn);
+  try {
+    const r = await api(`/api/messages/${m.id}/explain`, { method: "POST" });
+    box.replaceChildren();
+    put(box, h("div", { class: "explain-head" }, icon("sparkles"), "Summary"),
+      h("p", {}, r.summary),
+      r.actions.length ? [h("div", { class: "explain-sub" }, "Asked of you"), h("ul", {}, r.actions.map((a) => h("li", {}, a)))] : null,
+      r.dates.length ? [h("div", { class: "explain-sub" }, "Dates"), h("ul", {}, r.dates.map((d) => h("li", {}, h("b", {}, d.when), ` · ${d.what}`)))] : null);
+  } catch (e) { box.replaceChildren(h("div", { class: "error" }, e.message)); }
+  finally { done(); }
 }
 
 // Earlier messages of the conversation, received and sent, folded: tap one to read it.
