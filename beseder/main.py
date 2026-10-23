@@ -23,6 +23,7 @@ from .mail.imap import LoginRejected, MailService, reply_recipient
 from .mail.oauth_ms import MicrosoftOAuth
 from .mail.parse import sanitize_html
 from .service import Beseder
+from .lock import COOKIE, SESSION_DAYS, Lock
 from .unsubscribe import UnsubscribeError, one_click
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -134,6 +135,21 @@ class BulkIn(BaseModel):
     until: str = ""
 
 
+class UnlockIn(BaseModel):
+    passcode: str
+    label: str = ""
+
+
+class PasscodeIn(BaseModel):
+    current: str = ""
+    new: str = ""
+    label: str = ""
+
+
+# Reachable while locked: what the lock screen itself needs.
+OPEN_WHEN_LOCKED = {("GET", "/api/health"), ("GET", "/api/lock"), ("POST", "/api/lock/unlock")}
+
+
 class AskIn(BaseModel):
     question: str
     account_id: int | None = None
@@ -192,6 +208,7 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
 
     app = FastAPI(title="Beseder", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.core = core
+    lock = app.state.lock = Lock(core.db)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.allowed_hosts)
 
     @app.middleware("http")
@@ -200,7 +217,12 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
             if request.headers.get("x-beseder") != "1":
                 return JSONResponse({"detail": "Missing X-Beseder header"}, status_code=403)
-        response = await call_next(request)
+        # App lock: every API call needs this device's session (the static app shell holds no mail).
+        if (request.url.path.startswith("/api/") and (request.method, request.url.path) not in OPEN_WHEN_LOCKED
+                and lock.enabled and not lock.valid(request.cookies.get(COOKIE))):
+            response = JSONResponse({"detail": "Beseder is locked", "locked": True}, status_code=401)
+        else:
+            response = await call_next(request)
         response.headers["Content-Security-Policy"] = CSP
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -212,6 +234,52 @@ def create_app(config: Config | None = None, oauth: MicrosoftOAuth | None = None
         raise HTTPException(502, str(e))
 
     presets = presets_for(config.in_docker)
+
+    # --- app lock ---------------------------------------------------------
+    def set_session(request: Request, response: Response, token: str | None) -> None:
+        if token:
+            response.set_cookie(COOKIE, token, max_age=SESSION_DAYS * 86400, httponly=True, samesite="strict",
+                                secure=request.url.scheme == "https", path="/")
+        else:
+            response.delete_cookie(COOKIE, path="/")
+
+    @app.get("/api/lock")
+    def lock_status(request: Request):
+        return {"enabled": lock.enabled, "unlocked": not lock.enabled or lock.valid(request.cookies.get(COOKIE)),
+                "wait": lock.wait_seconds()}
+
+    @app.post("/api/lock/unlock")
+    def unlock(body: UnlockIn, request: Request, response: Response):
+        if not lock.enabled:
+            return {"ok": True}
+        try:
+            token = lock.unlock(body.passcode, body.label)
+        except TimeoutError as e:
+            raise HTTPException(429, f"Too many attempts: try again in {e.args[0]} s")
+        except PermissionError as e:
+            raise HTTPException(401, str(e))
+        set_session(request, response, token)
+        return {"ok": True}
+
+    @app.post("/api/lock/lock")
+    def lock_now(request: Request, response: Response):
+        """Locks this device (signs it out)."""
+        lock.end_session(request.cookies.get(COOKIE))
+        set_session(request, response, None)
+        return {"ok": True}
+
+    @app.put("/api/lock")
+    def set_passcode(body: PasscodeIn, request: Request, response: Response):
+        """Turns the lock on, changes the passcode, or turns it off (new = ""). Signs out the
+        other devices."""
+        try:
+            token = lock.set_passcode(body.current, body.new, body.label)
+        except PermissionError as e:
+            raise HTTPException(403, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        set_session(request, response, token)
+        return {"enabled": lock.enabled}
 
     # --- status -----------------------------------------------------------
     @app.get("/api/health")

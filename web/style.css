@@ -7,7 +7,7 @@
   --soft: #f5f6f8;
   --line: #ececf0;
   --text: #121216;
-  --muted: #8b8c96;
+  --muted: #686973;  /* 5:1 on white and on --soft (WCAG AA) */
   --ink: #0e0e11;
   --ink-text: #ffffff;
   --danger: #e5484d;
@@ -484,4 +484,26 @@ body[data-view="welcome"] .settings-col { display: block; }
   .tabbar svg.icon { width: 20px; height: 20px; }
   .tabbar .badge { position: absolute; top: 2px; left: calc(50% + 6px); min-width: 18px; height: 18px; padding: 0 5px;
     border-radius: 999px; background: var(--danger); color: #fff; font-size: 10px; font-weight: 700; display: grid; place-items: center; }
+}
+
+/* --- app lock ------------------------------------------------------------------------- */
+body.locked .app, body.locked .tabbar { visibility: hidden; }
+.lock-screen { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 16px;
+  background: linear-gradient(135deg, var(--page-a) 0%, var(--page-b) 55%, var(--page-a) 100%); }
+.lock-card { width: 100%; max-width: 380px; text-align: center; padding: 32px 26px; }
+.lock-card .logo { width: 56px; height: 56px; margin: 0 auto 14px; display: grid; place-items: center; border-radius: 18px;
+  background: var(--ink); color: var(--ink-text); }
+.lock-card h1 { font-size: 22px; margin: 0 0 6px; }
+.lock-form { display: flex; flex-direction: column; gap: 12px; margin-top: 18px; }
+.lock-form input { height: 52px; border-radius: 16px; border: 1px solid var(--line); background: var(--soft); padding: 0 16px;
+  font-size: 17px; text-align: center; letter-spacing: .2em; }
+.lock-form .pill.dark { justify-content: center; }
+
+/* --- accessibility ---------------------------------------------------------------------- */
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.search:focus-within, .browse-search:focus-within, .composer:focus-within { box-shadow: 0 0 0 2px var(--ink), var(--shadow); }
+.field input:focus-visible, .field select:focus-visible, .field textarea:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+.mail-card:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--ink), var(--shadow); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }

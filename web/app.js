@@ -106,6 +106,7 @@ async function api(path, opts = {}) {
   const r = await fetch(path, init);
   let data = null;
   try { data = await r.json(); } catch { /* empty body */ }
+  if (r.status === 401 && data && data.locked) { showLock(); throw new Error("Beseder is locked"); }
   if (!r.ok) throw new Error((data && data.detail) || `Error ${r.status}`);
   return data;
 }
@@ -381,7 +382,8 @@ async function renderList(before, beforeId) {
       class: "chip" + (state.category === key ? " active" : ""),
       onclick: () => { state.category = state.category === key ? "" : key; navigateList(); },
     }, label, counts[key] ? h("span", { class: "count" }, counts[key]) : null);
-    col.replaceChildren(
+    col.replaceChildren();
+    put(col,
       miniBrief(),
       state.sender ? senderHead() : null,
       h("div", { class: "chips" },
@@ -1249,7 +1251,7 @@ async function renderSettings() {
     ]);
   } catch (e) { toast(e.message); return; }
   col.replaceChildren(h("div", { class: "settings-grid" },
-    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, accountsCard(accounts, outlook), notificationsCard(), profileCard(ai), setupCard()),
+    h("div", { style: "display:flex;flex-direction:column;gap:18px" }, accountsCard(accounts, outlook), notificationsCard(), lockCard(), profileCard(ai), setupCard()),
     h("div", { style: "display:flex;flex-direction:column;gap:18px" }, aiCard(ai), assistantCard(), rulesCard(rules), safetyCard())));
 }
 
@@ -1947,10 +1949,94 @@ async function refreshIfChanged() {
     renderChrome(); renderSide(); renderList();
   }
 }
-if ("EventSource" in window) {
-  new EventSource("/api/events").onmessage = (e) => {
+let events = null;
+function startEvents() {
+  if (!("EventSource" in window) || (events && events.readyState !== EventSource.CLOSED)) return;
+  events = new EventSource("/api/events");
+  events.onmessage = (e) => {
     if (state.status && Number(e.data) !== state.status.version) refreshIfChanged();
   };
 }
-setInterval(() => { if (document.visibilityState === "visible") refreshIfChanged(); }, 30000);
-route();
+setInterval(() => { if (document.visibilityState === "visible" && !$("lock")) refreshIfChanged(); }, 30000);
+
+// --- app lock ------------------------------------------------------------------------------
+const deviceLabel = () => (isIOS() ? "iPhone" : /Android/.test(navigator.userAgent) ? "Android" : "Computer");
+
+function showLock() {
+  if ($("lock")) return;
+  events?.close();
+  const input = h("input", { type: "password", autocomplete: "current-password", placeholder: "Passcode",
+    "aria-label": "Passcode", enterkeyhint: "go" });
+  const err = h("div", { class: "error", role: "alert" });
+  const btn = h("button", { class: "pill dark", type: "submit" }, "Unlock");
+  const form = h("form", { class: "lock-form", onsubmit: async (e) => {
+    e.preventDefault();
+    err.textContent = "";
+    const done = busy(btn, "Unlocking…");
+    try {
+      await api("/api/lock/unlock", { method: "POST", body: { passcode: input.value, label: deviceLabel() } });
+      $("lock").remove();
+      document.body.classList.remove("locked");
+      state.summary = null;
+      startEvents();
+      $("list-col").dataset.ready = "";
+      route();
+    } catch (ex) { err.textContent = ex.message; input.select(); }
+    finally { done(); }
+  } }, input, btn);
+  document.body.classList.add("locked");
+  document.body.append(h("div", { id: "lock", class: "lock-screen", role: "dialog", "aria-modal": "true", "aria-label": "Beseder is locked" },
+    h("div", { class: "card lock-card" }, h("div", { class: "logo" }, icon("logo")),
+      h("h1", {}, "Beseder is locked"),
+      h("p", { class: "muted small" }, "Enter your passcode to open your mail on this device."),
+      form, err)));
+  // The pages behind it must not keep any mail on screen.
+  ["list-col", "reader-col", "side-col", "settings-col"].forEach((id) => $(id).replaceChildren());
+  input.focus();
+}
+
+function lockCard() {
+  const card = h("div", { class: "card" }, h("h2", {}, "App lock"), h("p", { class: "muted small" }, "Loading…"));
+  (async () => {
+    let st;
+    try { st = await api("/api/lock"); } catch (e) { card.replaceChildren(h("h2", {}, "App lock"), h("div", { class: "error" }, e.message)); return; }
+    const current = h("input", { type: "password", autocomplete: "current-password" });
+    const next = h("input", { type: "password", autocomplete: "new-password" });
+    const again = h("input", { type: "password", autocomplete: "new-password" });
+    const err = h("div", { class: "error" });
+    const save = (turnOff) => async () => {
+      err.textContent = "";
+      if (!turnOff && next.value !== again.value) { err.textContent = "The two passcodes don't match"; return; }
+      try {
+        await api("/api/lock", { method: "PUT", body: { current: current.value, new: turnOff ? "" : next.value, label: deviceLabel() } });
+        toast(turnOff ? "App lock off" : st.enabled ? "Passcode changed: other devices must unlock again" : "App lock on: other devices must unlock");
+        renderSettings();
+      } catch (e) { err.textContent = e.message; }
+    };
+    card.replaceChildren();
+    put(card,
+      h("h2", {}, icon("shield"), " App lock"),
+      h("p", { class: "muted small", style: "margin:0" }, st.enabled
+        ? "On. Each device asks for the passcode, then stays unlocked for 30 days of use."
+        : "Ask for a passcode before showing any mail, for shared computers or a phone left unlocked."),
+      st.enabled ? field("Current passcode", current) : null,
+      field(st.enabled ? "New passcode" : "Passcode", next, "At least 4 characters. Wrong guesses make you wait longer each time."),
+      field("Repeat it", again),
+      h("div", { class: "btns" },
+        h("button", { class: "pill dark sm", onclick: save(false) }, st.enabled ? "Change passcode" : "Turn on"),
+        st.enabled ? h("button", { class: "pill sm", onclick: save(true) }, "Turn off") : null,
+        st.enabled ? h("button", { class: "pill sm", onclick: async () => { await api("/api/lock/lock", { method: "POST" }); showLock(); } },
+          "Lock now") : null),
+      err);
+  })();
+  return card;
+}
+
+(async () => {
+  try {
+    const st = await (await fetch("/api/lock")).json();
+    if (!st.unlocked) return showLock();
+  } catch { /* offline: route() shows the error */ }
+  startEvents();
+  route();
+})();

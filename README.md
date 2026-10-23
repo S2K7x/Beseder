@@ -21,6 +21,7 @@ running on your own Raspberry Pi.
 - **Drafts replies in your style**, only when you ask. You read it and send it yourself.
 - **Sorting rules in plain words** ("emails from my kids' school are important"), one-tap
   unsubscribe, and a search that understands questions ("how much was my last power bill?").
+- **Private on shared devices**: an optional passcode lock per device.
 - **Never acts alone**: the AI cannot send, delete, move or forward anything. Only you can.
 - **Free to run**: use a free AI (OpenRouter, Google), a local one (Ollama) or your Claude subscription.
 

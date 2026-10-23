@@ -66,6 +66,15 @@ what it says. If you'd rather not show senders and subjects on your lock screen,
 App passwords, Microsoft tokens and AI keys are encrypted on disk with a key that only
 exists on your Pi (`secret.key`, readable only by Beseder). They are never written to logs.
 
+## Optional app lock
+
+Tailscale keeps strangers out, but not the people who use your devices. In **Settings › App
+lock** you can set a passcode: every device then has to unlock Beseder before it shows any
+mail, and stays unlocked for 30 days of use (or until you tap **Lock now**). The passcode is
+stored as a salted scrypt hash, never in clear, and wrong guesses make you wait longer and
+longer (30 s, then 1 min, 2 min… up to 15 min). Changing the passcode signs out every
+other device.
+
 ## Only you can reach it
 
 - Beseder only answers on the Pi itself. You reach it through Tailscale, your private

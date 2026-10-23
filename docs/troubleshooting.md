@@ -135,6 +135,15 @@ see grouped.
 It won't: a category you set by hand is never overwritten. To file *all* emails from a
 sender, pick the category and tap the **tag** button next to "Reply with AI".
 
+## I forgot my app lock passcode
+
+On the Pi, turn the lock off from the command line (your mail and settings are kept):
+
+```bash
+docker compose exec beseder python -c "from beseder.db import DB; from beseder.config import Config; \
+DB(Config().db_path).set_setting('lock_hash', None)"
+```
+
 ## Start over
 
 To restart the setup assistant: **Settings › Help › Run setup again**.

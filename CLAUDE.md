@@ -24,7 +24,9 @@ Everything (UI, API messages, prompts, docs, comments) is in English.
 5. **Secrets encrypted at rest** (Fernet, `data/secret.key` with mode 0600). Never log
    passwords, tokens or message content.
 6. API requests that change anything require the `X-Beseder: 1` header (anti-CSRF).
-   Do not remove that middleware.
+   Do not remove that middleware. When the optional app lock is on (`beseder/lock.py`),
+   every `/api/` route except `OPEN_WHEN_LOCKED` needs a valid session cookie: new routes
+   are covered automatically, keep it that way.
 
 ## Commands
 
